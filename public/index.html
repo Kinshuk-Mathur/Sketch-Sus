@@ -10,7 +10,9 @@
     <div id="app" class="app-shell"></div>
     <div id="toast" class="toast" aria-live="polite"></div>
     <script>
-      window.SKETCH_SUS_SERVER = "https://sketch-and-sus-server.onrender.com";
+      window.SKETCH_SUS_SERVER = window.location.hostname.endsWith("netlify.app")
+        ? "https://sketch-and-sus-server.onrender.com"
+        : window.location.origin;
     </script>
     <script src="/app.js" defer></script>
   </body>

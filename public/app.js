@@ -19,26 +19,60 @@ const ROLE_ASSET = {
   catcher: "/assets/catcher.png",
 };
 
-const PALETTE = ["#0f65b7", "#1a0b2b", "#1e356b", "#f4a60d", "#e83f99", "#e9d4b3", "#b24023", "#a1b4bc", "#90930f", "#11b3e1"];
-const STROKE_CHUNK_SIZE = 420;
+const PALETTE = [
+  "#1a0b2b",
+  "#ffffff",
+  "#ff1744",
+  "#ffea00",
+  "#ff2fb3",
+  "#7c3cff",
+  "#1e88ff",
+  "#00c2ff",
+  "#00d084",
+  "#ff8a00",
+  "#0f65b7",
+  "#f4a60d",
+  "#e83f99",
+  "#e9d4b3",
+  "#b24023",
+  "#a1b4bc",
+  "#90930f",
+  "#11b3e1",
+];
+
+const STREAM_INTERVAL_MS = 45;
+const STREAM_POINT_THRESHOLD = 8;
 
 let socket = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
 let state = null;
 let uiTicker = null;
 let selectedTarget = null;
-let brushColor = PALETTE[1];
+let brushColor = PALETTE[0];
 let brushWidth = 10;
 let tool = "brush";
 let activeStroke = null;
-let lastPhase = null;
 let lastVerdictTone = null;
+let lastVerdictKey = null;
+let verdictEffectPlayed = false;
 
 const savedName = localStorage.getItem("sketchSus:name") || "";
 const urlRoom = new URLSearchParams(window.location.search).get("room") || "";
 let entryName = savedName;
 let entryRoom = urlRoom.toUpperCase();
+let currentRoomCode = localStorage.getItem("sketchSus:room") || "";
+const playerToken = getOrCreatePlayerToken();
 
 const sfx = createSfx();
+
+function getOrCreatePlayerToken() {
+  const saved = localStorage.getItem("sketchSus:token");
+  if (saved) return saved;
+  const token = window.crypto?.randomUUID?.() || `token_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  localStorage.setItem("sketchSus:token", token);
+  return token;
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -49,35 +83,54 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function send(type, payload = {}) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    showToast("Socket is reconnecting.");
-    return;
-  }
+function sendRaw(type, payload = {}) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
   socket.send(JSON.stringify({ type, payload }));
+  return true;
+}
+
+function send(type, payload = {}) {
+  const sent = sendRaw(type, payload);
+  if (!sent) showToast("Connecting. Try again in a second.");
+  return sent;
 }
 
 function connect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+
   const serverUrl = new URL(window.SKETCH_SUS_SERVER || window.location.origin);
   serverUrl.protocol = serverUrl.protocol === "https:" ? "wss:" : "ws:";
   socket = new WebSocket(serverUrl.toString());
 
-  socket.addEventListener("open", () => render());
+  socket.addEventListener("open", () => {
+    reconnectAttempts = 0;
+    if (currentRoomCode) {
+      sendRaw("resume", { roomCode: currentRoomCode, token: playerToken, name: entryName });
+    } else {
+      render();
+    }
+  });
+
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
 
     if (message.type === "state") {
       const previousPhase = state?.phase;
       state = message.payload;
+      currentRoomCode = state.roomCode;
+      localStorage.setItem("sketchSus:room", state.roomCode);
+      if (state.me?.token) localStorage.setItem("sketchSus:token", state.me.token);
       if (previousPhase !== state.phase) handlePhaseSound(previousPhase, state.phase);
-      selectedTarget = shouldKeepSelection(state.phase) ? selectedTarget : null;
+      selectedTarget = state.phase === "judgement" ? selectedTarget : null;
+      resetVerdictMarkersIfNeeded();
       render();
       return;
     }
 
     if (message.type === "stroke") {
       applyStroke(message.payload);
-      sfx.play("remoteStroke");
+      if (message.payload.playerId !== state?.me?.id) sfx.play("remoteStroke");
       return;
     }
 
@@ -93,20 +146,39 @@ function connect() {
       return;
     }
 
+    if (message.type === "resumeFailed") {
+      currentRoomCode = "";
+      localStorage.removeItem("sketchSus:room");
+      state = null;
+      renderEntry("Ready");
+      return;
+    }
+
     if (message.type === "error") {
       showToast(message.payload.message || "Something went sideways.");
       sfx.play("fail");
     }
   });
 
-  socket.addEventListener("close", () => {
-    showToast("Socket disconnected. Refresh to rejoin the table.");
-    renderEntry("Disconnected");
-  });
+  socket.addEventListener("close", () => scheduleReconnect());
+  socket.addEventListener("error", () => scheduleReconnect());
 }
 
-function shouldKeepSelection(phase) {
-  return phase === "judgement";
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const delay = Math.min(5000, 600 + reconnectAttempts * 700);
+  reconnectAttempts += 1;
+  showToast("Reconnecting...");
+  reconnectTimer = setTimeout(connect, delay);
+}
+
+function resetVerdictMarkersIfNeeded() {
+  const key = state?.result ? `${state.result.resolvedAt}:${state.result.guessId}` : "";
+  if (key !== lastVerdictKey) {
+    lastVerdictKey = key;
+    lastVerdictTone = null;
+    verdictEffectPlayed = false;
+  }
 }
 
 function handlePhaseSound(previous, next) {
@@ -115,7 +187,6 @@ function handlePhaseSound(previous, next) {
   if (next === "drawing") sfx.play("drawStart");
   if (next === "judgement") sfx.play("lock");
   if (next === "gameOver") sfx.play("success");
-  lastPhase = next;
 }
 
 function showToast(message) {
@@ -146,10 +217,6 @@ function roleAsset(role) {
   return ROLE_ASSET[role] || ROLE_ASSET.inkster;
 }
 
-function myPlayer() {
-  return state?.players.find((player) => player.id === state.me.id);
-}
-
 function playerById(id) {
   return state?.players.find((player) => player.id === id);
 }
@@ -173,6 +240,22 @@ function inviteLink() {
   return url.toString();
 }
 
+function matchText() {
+  if (!state || state.phase === "lobby") return `${state?.settings.rounds || 0} rounds · 3 matches each`;
+  if (state.phase === "gameOver") return `Completed ${state.totalMatches || 0} matches`;
+  return `Round ${state.round}/${state.settings.rounds} · Match ${state.match}/${state.matchesPerRound}`;
+}
+
+function displayScore(player) {
+  const result = state?.result;
+  if (state?.phase === "verdict" && result) {
+    const revealed = Date.now() - result.resolvedAt >= result.revealDelayMs;
+    const scores = revealed ? result.scoreAfter : result.scoreBefore;
+    return scores?.[player.id] ?? player.score;
+  }
+  return player.score;
+}
+
 function render() {
   if (!state) {
     renderEntry();
@@ -191,7 +274,10 @@ function render() {
   app.innerHTML = `
     ${renderTopbar()}
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
-    <main class="screen">${content}</main>
+    <main class="screen game-shell">
+      ${renderScoreboard()}
+      <section class="screen-content">${content}</section>
+    </main>
   `;
 
   afterRender();
@@ -237,7 +323,7 @@ function renderTopbar() {
         <img src="/assets/logo.jpeg" alt="Sketch & Sus" />
         <div>
           <strong>Sketch & Sus</strong>
-          <span>Round ${state.round || 0}/${state.settings.rounds}</span>
+          <span>${escapeHtml(matchText())}</span>
         </div>
       </div>
       <div class="status-strip" aria-label="Game status">
@@ -252,19 +338,49 @@ function renderTopbar() {
   `;
 }
 
+function renderScoreboard() {
+  return `
+    <aside class="scoreboard" aria-label="Points table">
+      <div class="scoreboard-head">
+        <strong>Points</strong>
+        <span>${escapeHtml(matchText())}</span>
+      </div>
+      <div class="score-list">
+        ${[...state.players]
+          .sort((a, b) => displayScore(b) - displayScore(a))
+          .map(renderScoreRow)
+          .join("")}
+      </div>
+    </aside>
+  `;
+}
+
+function renderScoreRow(player) {
+  const delta = state.result?.deltas?.[player.id] ?? 0;
+  const sign = delta > 0 ? "+" : "";
+  return `
+    <div class="score-row ${player.connected ? "" : "is-offline"}" data-score-row="${player.id}">
+      <i style="background:${player.color}"></i>
+      <span>${escapeHtml(player.name)}</span>
+      <strong data-score-id="${player.id}">${displayScore(player)}</strong>
+      <em data-delta-id="${player.id}" class="${delta > 0 ? "positive" : delta < 0 ? "negative" : ""}">${sign}${delta}</em>
+    </div>
+  `;
+}
+
 function renderLobby() {
   const isHost = state.me.isHost;
   return `
     <section class="lobby-grid">
       <div class="lobby-hero dark-panel">
-        <div class="palette-ribbon" aria-hidden="true">${PALETTE.map((color) => `<i style="background:${color}"></i>`).join("")}</div>
+        <div class="palette-ribbon" aria-hidden="true">${PALETTE.slice(0, 10).map((color) => `<i style="background:${color}"></i>`).join("")}</div>
         <div class="lobby-logo-frame">
           <img src="/assets/logo.jpeg" alt="Sketch & Sus logo" />
         </div>
         <div>
           <p class="eyebrow">Room ${state.roomCode}</p>
-          <h1>Everyone draws. One player is faking it.</h1>
-          <p class="lobby-subline">Share the code, pick the round count, then let the role engine deal the chaos.</p>
+          <h1>Three matches per round. One player is faking it.</h1>
+          <p class="lobby-subline">Inksters know the word. Chameleon copies from blur. Catcher chooses after timer.</p>
         </div>
         <div class="hero-actions">
           <button class="primary-btn" data-action="copyLink">Copy invite</button>
@@ -286,11 +402,9 @@ function renderLobby() {
           <span>${isHost ? "Host controls" : "Waiting on host"}</span>
         </div>
         ${renderSetting("rounds", "Rounds", state.settings.rounds, 1, 10, isHost)}
-        ${renderSetting("drawSeconds", "Draw time", state.settings.drawSeconds, 30, 180, isHost)}
-        ${renderSetting("judgementSeconds", "Catcher time", state.settings.judgementSeconds, 20, 60, isHost)}
         <div class="math-lock">
-          <strong>Fairness engine</strong>
-          <span>Reservoir weights + Gaussian noise + role cooldowns</span>
+          <strong>Fixed match rules</strong>
+          <span>3 matches per round · 80s draw · 40s catcher decision</span>
         </div>
       </section>
     </section>
@@ -312,7 +426,7 @@ function renderPlayerRow(player) {
     <div class="player-row ${player.connected ? "" : "is-offline"}">
       <i style="background:${player.color}"></i>
       <span>${escapeHtml(player.name)}</span>
-      <strong>${player.score}</strong>
+      <strong>${displayScore(player)}</strong>
       <small>${escapeHtml(role)}</small>
     </div>
   `;
@@ -324,7 +438,7 @@ function renderRoleReveal() {
   return `
     <section class="reveal-stage dark-panel role-${role}">
       <img class="role-character" src="${roleAsset(role)}" alt="${ROLE_LABEL[role]} character" />
-      <p class="eyebrow">Role flash</p>
+      <p class="eyebrow">${escapeHtml(matchText())}</p>
       <h1>${roleName(role)}</h1>
       <div class="role-chip-line">
         <span>Catcher: ${escapeHtml(catcher?.name || "Unknown")}</span>
@@ -351,7 +465,7 @@ function renderDrawerStage() {
       <div class="draw-main dark-panel">
         <div class="draw-head">
           <div>
-            <p class="eyebrow">${roleName(state.me.role)}</p>
+            <p class="eyebrow">${roleName(state.me.role)} · ${escapeHtml(matchText())}</p>
             <h1>${state.word ? escapeHtml(state.word) : "Blend from the blur"}</h1>
           </div>
           <div class="timer-badge"><span class="js-timer">${formatTimer()}</span></div>
@@ -364,7 +478,7 @@ function renderDrawerStage() {
           ? `<aside class="watch-panel">
               <div class="panel-heading">
                 <h2>Blur feed</h2>
-                <span>Copy carefully</span>
+                <span>Live hints</span>
               </div>
               <div class="mini-grid is-blurred">
                 ${drawingPlayers()
@@ -405,7 +519,7 @@ function renderCatcherLive() {
   return `
     <section class="catcher-timer-stage dark-panel">
       <img class="catcher-timer-character" src="${roleAsset("catcher")}" alt="Catcher character" />
-      <p class="eyebrow">${roleName("catcher")}</p>
+      <p class="eyebrow">${roleName("catcher")} · ${escapeHtml(matchText())}</p>
       <h1 class="mega-timer js-timer">${formatTimer()}</h1>
       <strong>Drawings unlock after the timer.</strong>
     </section>
@@ -429,7 +543,7 @@ function renderJudgement() {
     <section class="judgement-stage dark-panel">
       <div class="draw-head">
         <div>
-          <p class="eyebrow">Final decision</p>
+          <p class="eyebrow">Final decision · ${escapeHtml(matchText())}</p>
           <h1>Catcher, lock the Chameleon</h1>
         </div>
         <div class="timer-badge"><span class="js-timer">${formatTimer()}</span></div>
@@ -446,7 +560,7 @@ function renderWaitingJudgement() {
   return `
     <section class="catcher-timer-stage dark-panel wait-stage">
       <img class="catcher-timer-character" src="${roleAsset(state.me.role)}" alt="${ROLE_LABEL[state.me.role]} character" />
-      <p class="eyebrow">Final decision</p>
+      <p class="eyebrow">Final decision · ${escapeHtml(matchText())}</p>
       <h1 class="mega-timer js-timer">${formatTimer()}</h1>
       <strong>Catcher is choosing the Chameleon.</strong>
     </section>
@@ -470,21 +584,43 @@ function renderDrawingTile(player, mode = {}) {
   `;
 }
 
+function verdictLineForMe(result) {
+  if (result.caught) {
+    if (state.me.role === "catcher") return "You win as Catcher";
+    if (state.me.role === "chameleon") return "You lose, Catcher wins";
+    return `${result.catcherName} wins as Catcher`;
+  }
+
+  if (state.me.role === "chameleon") return "You win as Chameleon";
+  if (state.me.role === "catcher") return "You lose, Chameleon wins";
+  return `${result.chameleonName} wins as Chameleon`;
+}
+
 function renderVerdict() {
   const result = state.result;
+  const nextText = state.matchIndex >= state.totalMatches ? "Final leaderboard" : "Next match";
   return `
     <section class="verdict-stage dark-panel ${result?.caught ? "is-success" : "is-chameleon"}">
+      <div id="verdictFx" class="verdict-fx" aria-hidden="true"></div>
       <div class="verdict-copy">
-        <img class="verdict-character" src="${roleAsset(result?.caught ? "catcher" : "chameleon")}" alt="${result?.caught ? "Catcher" : "Chameleon"} winner character" />
+        <img id="verdictCharacter" class="verdict-character is-hidden" src="${roleAsset(result?.caught ? "catcher" : "chameleon")}" alt="${result?.caught ? "Catcher" : "Chameleon"} winner character" />
         <p class="eyebrow">${escapeHtml(result?.verdictLine || "")}</p>
-        <h1 id="verdictPulse">3</h1>
-        <strong id="verdictTagline">${escapeHtml(result?.tagline || "")}</strong>
+        <h1 id="verdictPulse">5</h1>
+        <strong id="verdictRoleLine" class="is-hidden">${escapeHtml(result ? verdictLineForMe(result) : "")}</strong>
+        <strong id="verdictTagline" class="is-hidden">${escapeHtml(result?.tagline || "")}</strong>
       </div>
       <div class="suspect-grid reveal">
         ${drawingPlayers().map((player) => renderDrawingTile(player, { locked: true })).join("")}
       </div>
       <div class="delta-strip">
         ${state.players.map(renderDelta).join("")}
+      </div>
+      <div class="judgement-bar">
+        ${
+          state.me.isHost
+            ? `<button class="primary-btn" data-action="nextMatch">${nextText}</button>`
+            : `<span>Waiting for host to continue.</span>`
+        }
       </div>
     </section>
   `;
@@ -496,7 +632,7 @@ function renderDelta(player) {
   return `
     <span>
       <b>${escapeHtml(player.name)}</b>
-      <strong class="${delta >= 0 ? "positive" : "negative"}">${sign}${delta}</strong>
+      <strong class="${delta > 0 ? "positive" : delta < 0 ? "negative" : ""}">${sign}${delta}</strong>
     </span>
   `;
 }
@@ -553,6 +689,7 @@ function afterRender() {
   mountDrawingCanvas();
   startUiTicker();
   updateVerdictVisual();
+  updateScoreboard();
 }
 
 function clearUiTicker() {
@@ -568,29 +705,76 @@ function startUiTicker() {
       element.textContent = formatTimer();
     });
     updateVerdictVisual();
-  }, 250);
+    updateScoreboard();
+  }, 200);
+}
+
+function updateScoreboard() {
+  if (!state) return;
+  for (const player of state.players) {
+    const score = document.querySelector(`[data-score-id="${player.id}"]`);
+    if (score) score.textContent = displayScore(player);
+
+    const delta = document.querySelector(`[data-delta-id="${player.id}"]`);
+    if (delta) {
+      const revealed = state.phase === "verdict" && state.result && Date.now() - state.result.resolvedAt >= state.result.revealDelayMs;
+      delta.classList.toggle("is-visible", Boolean(revealed));
+    }
+  }
 }
 
 function updateVerdictVisual() {
   if (!state || state.phase !== "verdict" || !state.result) return;
   const pulse = document.querySelector("#verdictPulse");
+  const roleLine = document.querySelector("#verdictRoleLine");
   const tagline = document.querySelector("#verdictTagline");
-  if (!pulse || !tagline) return;
+  const character = document.querySelector("#verdictCharacter");
+  const stage = document.querySelector(".verdict-stage");
+  if (!pulse || !roleLine || !tagline || !character || !stage) return;
 
   const elapsed = Date.now() - state.result.resolvedAt;
-  let text = state.result.headline;
-  if (elapsed < 1000) text = "3";
-  else if (elapsed < 2000) text = "2";
-  else if (elapsed < 3000) text = "1";
+  const revealDelay = state.result.revealDelayMs || 5000;
+  const remaining = Math.max(1, Math.ceil((revealDelay - elapsed) / 1000));
 
-  pulse.textContent = text;
-  pulse.classList.toggle("is-final", elapsed >= 3000);
+  if (elapsed < revealDelay) {
+    pulse.textContent = String(remaining);
+    stage.classList.remove("is-revealed");
+    roleLine.classList.add("is-hidden");
+    tagline.classList.add("is-hidden");
+    character.classList.add("is-hidden");
+  } else {
+    pulse.textContent = state.result.headline;
+    pulse.classList.add("is-final");
+    stage.classList.add("is-revealed");
+    roleLine.textContent = verdictLineForMe(state.result);
+    roleLine.classList.remove("is-hidden");
+    tagline.classList.remove("is-hidden");
+    character.classList.remove("is-hidden");
+    if (!verdictEffectPlayed) {
+      verdictEffectPlayed = true;
+      spawnVerdictEffect(state.result.caught);
+    }
+  }
 
-  if (lastVerdictTone !== text) {
-    lastVerdictTone = text;
-    if (text === "3" || text === "2" || text === "1") sfx.play("countdown");
+  const tone = elapsed < revealDelay ? String(remaining) : state.result.headline;
+  if (lastVerdictTone !== tone) {
+    lastVerdictTone = tone;
+    if (elapsed < revealDelay) sfx.play("countdown");
     else sfx.play(state.result.caught ? "success" : "fail");
   }
+}
+
+function spawnVerdictEffect(caught) {
+  const fx = document.querySelector("#verdictFx");
+  if (!fx) return;
+  const emojis = caught ? ["🎉", "🎊", "✨", "🏆"] : ["😭", "💀", "🤡", "🫠"];
+  fx.innerHTML = Array.from({ length: 38 }, (_, index) => {
+    const left = Math.round(Math.random() * 100);
+    const delay = (Math.random() * 0.7).toFixed(2);
+    const drift = Math.round(Math.random() * 160 - 80);
+    const emoji = emojis[index % emojis.length];
+    return `<span style="left:${left}%; --delay:${delay}s; --drift:${drift}px">${emoji}</span>`;
+  }).join("");
 }
 
 function mountDrawingCanvas() {
@@ -608,6 +792,9 @@ function mountDrawingCanvas() {
       width: brushWidth,
       tool,
       points: [point],
+      unsent: [],
+      lastSentPoint: point,
+      lastFlushAt: performance.now(),
     };
     sfx.play("brush");
   };
@@ -618,10 +805,12 @@ function mountDrawingCanvas() {
     for (const pointerEvent of events) {
       const point = canvasPoint(canvas, pointerEvent);
       const previous = activeStroke.points[activeStroke.points.length - 1];
-      if (Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0016) continue;
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0014) continue;
       activeStroke.points.push(point);
+      activeStroke.unsent.push(point);
       drawSegment(canvas, previous, point, activeStroke);
     }
+    flushActiveStroke(false);
   };
 
   canvas.onpointerup = endStroke;
@@ -631,26 +820,28 @@ function mountDrawingCanvas() {
   };
 }
 
-function endStroke() {
-  if (!activeStroke) return;
-  if (activeStroke.points.length > 1) {
-    for (const stroke of splitStroke(activeStroke)) send("stroke", stroke);
-  }
-  activeStroke = null;
+function flushActiveStroke(force) {
+  if (!activeStroke || activeStroke.unsent.length === 0) return;
+  const now = performance.now();
+  if (!force && activeStroke.unsent.length < STREAM_POINT_THRESHOLD && now - activeStroke.lastFlushAt < STREAM_INTERVAL_MS) return;
+
+  const points = [activeStroke.lastSentPoint, ...activeStroke.unsent];
+  send("stroke", {
+    color: activeStroke.color,
+    width: activeStroke.width,
+    tool: activeStroke.tool,
+    points,
+  });
+
+  activeStroke.lastSentPoint = activeStroke.unsent[activeStroke.unsent.length - 1];
+  activeStroke.unsent = [];
+  activeStroke.lastFlushAt = now;
 }
 
-function splitStroke(stroke) {
-  if (stroke.points.length <= STROKE_CHUNK_SIZE) return [stroke];
-  const chunks = [];
-  for (let index = 0; index < stroke.points.length - 1; index += STROKE_CHUNK_SIZE - 1) {
-    chunks.push({
-      color: stroke.color,
-      width: stroke.width,
-      tool: stroke.tool,
-      points: stroke.points.slice(index, index + STROKE_CHUNK_SIZE),
-    });
-  }
-  return chunks.filter((chunk) => chunk.points.length > 1);
+function endStroke() {
+  if (!activeStroke) return;
+  flushActiveStroke(true);
+  activeStroke = null;
 }
 
 function canvasPoint(canvas, event) {
@@ -666,8 +857,17 @@ function applyStroke(payload) {
   const canvas = canvasFor(payload.playerId);
   if (!canvas) return;
   canvas.strokes.push(payload.stroke);
-  if (payload.playerId === state.me.id) redrawMainCanvas();
-  renderPreviewCanvases();
+
+  if (!(payload.playerId === state.me.id && state.phase === "drawing")) {
+    paintStrokeOnVisibleCanvases(payload.playerId, payload.stroke);
+  }
+}
+
+function paintStrokeOnVisibleCanvases(playerId, stroke) {
+  document.querySelectorAll(`canvas[data-preview-id="${playerId}"]`).forEach((canvas) => {
+    const context = canvas.getContext("2d");
+    drawStroke(context, stroke, canvas.width, canvas.height);
+  });
 }
 
 function replaceCanvas(playerId, strokes) {
@@ -715,6 +915,8 @@ function drawPlayerCanvas(canvas, playerId) {
 function drawStroke(context, stroke, width, height) {
   if (!stroke.points || stroke.points.length < 2) return;
   context.save();
+  context.lineJoin = "round";
+  context.lineCap = "round";
   context.globalCompositeOperation = stroke.tool === "eraser" ? "destination-out" : "source-over";
   context.strokeStyle = stroke.color;
   context.lineWidth = stroke.width;
@@ -785,14 +987,14 @@ app.addEventListener("click", async (event) => {
 
   if (action === "createRoom") {
     collectEntry();
-    send("createRoom", { name: entryName });
+    send("createRoom", { name: entryName, token: playerToken });
     sfx.play("join");
     return;
   }
 
   if (action === "joinRoom") {
     collectEntry();
-    send("joinRoom", { name: entryName, roomCode: entryRoom });
+    send("joinRoom", { name: entryName, roomCode: entryRoom, token: playerToken });
     sfx.play("join");
     return;
   }
@@ -859,7 +1061,15 @@ app.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "nextMatch") {
+    send("nextMatch");
+    sfx.play("start");
+    return;
+  }
+
   if (action === "backToLobby") {
+    currentRoomCode = "";
+    localStorage.removeItem("sketchSus:room");
     send("backToLobby");
     sfx.play("click");
   }

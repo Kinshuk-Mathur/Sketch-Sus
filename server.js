@@ -2,10 +2,15 @@ const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const { WebSocketServer } = require("ws");
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, "public");
-const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const MATCHES_PER_ROUND = 3;
+const DRAW_SECONDS = 80;
+const JUDGEMENT_SECONDS = 40;
+const ROLE_REVEAL_SECONDS = 5;
+const RECONNECT_GRACE_MS = 60_000;
 
 const ROLE = {
   INKSTER: "inkster",
@@ -102,7 +107,7 @@ const MIME_TYPES = {
 };
 
 const rooms = new Map();
-const clients = new Map();
+const clientsByPlayerId = new Map();
 
 function secureUnit() {
   return crypto.randomInt(1, 1_000_000_000) / 1_000_000_000;
@@ -119,7 +124,7 @@ function clamp(value, min, max) {
 }
 
 function makeId(prefix) {
-  return `${prefix}_${crypto.randomBytes(5).toString("hex")}`;
+  return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
 }
 
 function makeRoomCode() {
@@ -136,8 +141,19 @@ function normalizeName(name) {
   return clean || `Player ${crypto.randomInt(10, 99)}`;
 }
 
+function normalizeToken(token) {
+  const clean = String(token || "")
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+    .slice(0, 80);
+  return clean || makeId("token");
+}
+
 function randomChoice(items) {
   return items[crypto.randomInt(0, items.length)];
+}
+
+function totalMatches(room) {
+  return room.settings.rounds * MATCHES_PER_ROUND;
 }
 
 function createRoom() {
@@ -148,13 +164,16 @@ function createRoom() {
     players: new Map(),
     settings: {
       rounds: 5,
-      drawSeconds: 80,
-      judgementSeconds: 40,
+      drawSeconds: DRAW_SECONDS,
+      judgementSeconds: JUDGEMENT_SECONDS,
+      matchesPerRound: MATCHES_PER_ROUND,
     },
     phase: "lobby",
     phaseEndsAt: null,
     timer: null,
     round: 0,
+    match: 0,
+    matchIndex: 0,
     word: null,
     catcherId: null,
     chameleonId: null,
@@ -174,48 +193,77 @@ function activeDrawingPlayers(room) {
   return [...room.players.values()].filter((player) => player.role && player.role !== ROLE.CATCHER);
 }
 
+function findPlayerByToken(room, token) {
+  return [...room.players.values()].find((player) => player.token === token) || null;
+}
+
 function ensureHost(room) {
   if (room.hostId && room.players.get(room.hostId)?.connected) return;
   room.hostId = connectedPlayers(room)[0]?.id || null;
 }
 
-function leaveCurrentRoom(client) {
+function bindClientToPlayer(room, client, player) {
+  const oldClient = clientsByPlayerId.get(player.id);
+  if (oldClient && oldClient !== client && oldClient.ws.readyState === oldClient.ws.OPEN) {
+    oldClient.replaced = true;
+    oldClient.ws.close(1000, "Reconnected elsewhere");
+  }
+
+  clearTimeout(player.disconnectTimer);
+  player.disconnectTimer = null;
+  player.connected = true;
+  client.roomCode = room.code;
+  client.playerId = player.id;
+  clientsByPlayerId.set(player.id, client);
+  ensureHost(room);
+}
+
+function detachClient(client) {
   if (!client.roomCode || !client.playerId) return;
   const room = rooms.get(client.roomCode);
   if (!room) return;
-
   const player = room.players.get(client.playerId);
-  if (player) {
-    if (room.phase === "lobby" || room.phase === "gameOver") {
-      room.players.delete(player.id);
-    } else {
-      player.connected = false;
-    }
+
+  if (player && clientsByPlayerId.get(player.id) === client) {
+    clientsByPlayerId.delete(player.id);
+    player.connected = false;
+    clearTimeout(player.disconnectTimer);
+    player.disconnectTimer = setTimeout(() => {
+      if (!player.connected && (room.phase === "lobby" || room.phase === "gameOver")) {
+        room.players.delete(player.id);
+      }
+      ensureHost(room);
+      if ([...room.players.values()].every((roomPlayer) => !roomPlayer.connected)) {
+        clearTimeout(room.timer);
+        rooms.delete(room.code);
+        return;
+      }
+      broadcastState(room);
+    }, RECONNECT_GRACE_MS);
+    player.disconnectTimer.unref?.();
   }
 
-  ensureHost(room);
   client.roomCode = null;
   client.playerId = null;
-
-  if (connectedPlayers(room).length === 0) {
-    clearTimeout(room.timer);
-    rooms.delete(room.code);
-    return;
-  }
-
-  if (room.phase !== "lobby" && room.phase !== "gameOver" && connectedPlayers(room).length < 3) {
-    resetToLobby(room, "Game paused because fewer than 3 players are connected.");
-    return;
-  }
-
+  ensureHost(room);
   broadcastState(room);
 }
 
-function addPlayerToRoom(room, client, name) {
-  leaveCurrentRoom(client);
+function addPlayerToRoom(room, client, name, token) {
+  detachClient(client);
+  const cleanToken = normalizeToken(token);
+  let player = findPlayerByToken(room, cleanToken);
 
-  const player = {
-    id: client.id,
+  if (player) {
+    player.name = normalizeName(name || player.name);
+    bindClientToPlayer(room, client, player);
+    broadcastState(room);
+    return player;
+  }
+
+  player = {
+    id: makeId("player"),
+    token: cleanToken,
     name: normalizeName(name),
     score: 0,
     connected: true,
@@ -226,17 +274,26 @@ function addPlayerToRoom(room, client, name) {
       [ROLE.CHAMELEON]: 0,
       [ROLE.CATCHER]: 0,
     },
-    lastSpecialRound: 0,
+    lastSpecialMatch: 0,
     color: PLAYER_COLORS[room.players.size % PLAYER_COLORS.length],
+    disconnectTimer: null,
   };
 
   if (room.players.size === 0) room.hostId = player.id;
-
   room.players.set(player.id, player);
-  client.roomCode = room.code;
-  client.playerId = player.id;
-  ensureHost(room);
+  bindClientToPlayer(room, client, player);
   broadcastState(room);
+  return player;
+}
+
+function resumePlayer(room, client, name, token) {
+  detachClient(client);
+  const player = findPlayerByToken(room, normalizeToken(token));
+  if (!player) return null;
+  player.name = normalizeName(name || player.name);
+  bindClientToPlayer(room, client, player);
+  broadcastState(room);
+  return player;
 }
 
 function resetPlayerRoundState(player) {
@@ -246,7 +303,7 @@ function resetPlayerRoundState(player) {
 function resetPlayerGameState(player) {
   player.score = 0;
   player.lastRole = null;
-  player.lastSpecialRound = 0;
+  player.lastSpecialMatch = 0;
   player.roleCounts = {
     [ROLE.INKSTER]: 0,
     [ROLE.CHAMELEON]: 0,
@@ -276,16 +333,16 @@ function roleExpectedShare(role, playerCount) {
   return Math.max(0, playerCount - 2) / playerCount;
 }
 
-function roleWeight(player, role, roundNumber, playerCount) {
-  const expected = (roundNumber - 1) * roleExpectedShare(role, playerCount);
+function roleWeight(player, role, matchNumber, playerCount) {
+  const expected = (matchNumber - 1) * roleExpectedShare(role, playerCount);
   const actual = player.roleCounts[role] || 0;
   const fairness = Math.exp((expected - actual) * 0.85);
   const cooldown = player.lastRole === role ? (role === ROLE.INKSTER ? 0.42 : 0.035) : 1;
-  const specialDrought = role === ROLE.INKSTER ? 1 : clamp(1 + (roundNumber - 1 - player.lastSpecialRound) * 0.08, 1, 2.4);
+  const specialDrought = role === ROLE.INKSTER ? 1 : clamp(1 + (matchNumber - 1 - player.lastSpecialMatch) * 0.08, 1, 2.4);
   return clamp(fairness * cooldown * specialDrought, 0.001, 40);
 }
 
-function sampleRoleLayout(players, roundNumber) {
+function sampleRoleLayout(players, matchNumber) {
   let best = null;
 
   for (const catcher of players) {
@@ -298,10 +355,9 @@ function sampleRoleLayout(players, roundNumber) {
       for (const player of players) {
         const role = player.id === catcher.id ? ROLE.CATCHER : player.id === chameleon.id ? ROLE.CHAMELEON : ROLE.INKSTER;
         assignments.set(player.id, role);
-        logWeight += Math.log(roleWeight(player, role, roundNumber, players.length));
+        logWeight += Math.log(roleWeight(player, role, matchNumber, players.length));
       }
 
-      // Weighted reservoir key with Box-Muller Gaussian noise keeps the result fair but hard to predict.
       const noisyWeight = Math.exp(clamp(logWeight + gaussianNoise() * 0.32, -35, 35));
       const key = Math.log(secureUnit()) / noisyWeight;
       if (!best || key > best.key) best = { key, assignments };
@@ -312,7 +368,7 @@ function sampleRoleLayout(players, roundNumber) {
 }
 
 function assignRoles(room, players) {
-  const assignments = sampleRoleLayout(players, room.round);
+  const assignments = sampleRoleLayout(players, room.matchIndex);
   room.catcherId = null;
   room.chameleonId = null;
 
@@ -327,7 +383,7 @@ function assignRoles(room, players) {
   for (const player of players) {
     player.lastRole = player.role;
     if (player.role === ROLE.CATCHER || player.role === ROLE.CHAMELEON) {
-      player.lastSpecialRound = room.round;
+      player.lastSpecialMatch = room.matchIndex;
     }
   }
 }
@@ -335,45 +391,39 @@ function assignRoles(room, players) {
 function startGame(room) {
   clearTimeout(room.timer);
   room.round = 0;
+  room.match = 0;
+  room.matchIndex = 0;
   room.word = null;
   room.result = null;
   room.usedWords = [];
 
-  for (const [id, player] of room.players) {
-    if (!player.connected) room.players.delete(id);
+  for (const player of room.players.values()) {
+    if (player.connected) resetPlayerGameState(player);
   }
-
-  for (const player of connectedPlayers(room)) resetPlayerGameState(player);
-  startNextRound(room);
+  startNextMatch(room);
 }
 
-function startNextRound(room) {
-  for (const [id, player] of room.players) {
-    if (!player.connected) room.players.delete(id);
-  }
-
+function startNextMatch(room) {
   ensureHost(room);
   const players = connectedPlayers(room);
   if (players.length < 3) {
-    resetToLobby(room, "Need at least 3 players to keep playing.");
+    resetToLobby(room, "Need at least 3 players to play.");
     return;
   }
 
-  if (room.round >= room.settings.rounds) {
-    room.phase = "gameOver";
-    room.phaseEndsAt = null;
-    room.result = null;
-    clearTimeout(room.timer);
-    broadcastState(room);
+  if (room.matchIndex >= totalMatches(room)) {
+    transitionToGameOver(room);
     return;
   }
 
-  room.round += 1;
+  room.matchIndex += 1;
+  room.round = Math.floor((room.matchIndex - 1) / MATCHES_PER_ROUND) + 1;
+  room.match = ((room.matchIndex - 1) % MATCHES_PER_ROUND) + 1;
   room.word = pickWord(room);
   room.result = null;
   room.canvases = new Map();
 
-  for (const player of players) resetPlayerRoundState(player);
+  for (const player of room.players.values()) resetPlayerRoundState(player);
   assignRoles(room, players);
 
   for (const player of players) {
@@ -382,7 +432,16 @@ function startNextRound(room) {
     }
   }
 
-  transitionTo(room, "roleReveal", 5);
+  transitionTo(room, "roleReveal", ROLE_REVEAL_SECONDS);
+}
+
+function transitionToGameOver(room) {
+  clearTimeout(room.timer);
+  room.phase = "gameOver";
+  room.phaseEndsAt = null;
+  room.result = null;
+  for (const player of room.players.values()) resetPlayerRoundState(player);
+  broadcastState(room);
 }
 
 function resetToLobby(room, notice) {
@@ -390,11 +449,14 @@ function resetToLobby(room, notice) {
   room.phase = "lobby";
   room.phaseEndsAt = null;
   room.round = 0;
+  room.match = 0;
+  room.matchIndex = 0;
   room.word = null;
   room.catcherId = null;
   room.chameleonId = null;
   room.canvases = new Map();
   room.result = null;
+  room.usedWords = [];
   for (const player of room.players.values()) resetPlayerRoundState(player);
   broadcastState(room, notice);
 }
@@ -413,37 +475,34 @@ function onPhaseTimeout(code, phase) {
   if (!room || room.phase !== phase) return;
 
   if (phase === "roleReveal") {
-    transitionTo(room, "drawing", room.settings.drawSeconds);
+    transitionTo(room, "drawing", DRAW_SECONDS);
     return;
   }
 
   if (phase === "drawing") {
-    transitionTo(room, "judgement", room.settings.judgementSeconds);
+    transitionTo(room, "judgement", JUDGEMENT_SECONDS);
     return;
   }
 
   if (phase === "judgement") {
     finalizeGuess(room, pickAutomaticGuess(room), true);
-    return;
-  }
-
-  if (phase === "verdict") {
-    startNextRound(room);
   }
 }
 
 function sanitizeSettings(input, existing) {
   return {
+    ...existing,
     rounds: clamp(Math.round(Number(input.rounds ?? existing.rounds)), 1, 10),
-    drawSeconds: clamp(Math.round(Number(input.drawSeconds ?? existing.drawSeconds)), 40, 180),
-    judgementSeconds: clamp(Math.round(Number(input.judgementSeconds ?? existing.judgementSeconds)), 20, 60),
+    drawSeconds: DRAW_SECONDS,
+    judgementSeconds: JUDGEMENT_SECONDS,
+    matchesPerRound: MATCHES_PER_ROUND,
   };
 }
 
 function sanitizeStroke(input) {
   const points = Array.isArray(input.points)
     ? input.points
-        .slice(0, 6000)
+        .slice(0, 700)
         .map((point) => ({
           x: clamp(Number(point.x), 0, 1),
           y: clamp(Number(point.y), 0, 1),
@@ -462,6 +521,7 @@ function sanitizeStroke(input) {
     color,
     width,
     tool,
+    sentAt: Date.now(),
   };
 }
 
@@ -494,7 +554,17 @@ function scoreRound(room, caught) {
     add(room.chameleonId, 600);
   }
 
+  for (const player of room.players.values()) {
+    if (!(player.id in deltas)) deltas[player.id] = 0;
+  }
+
   return deltas;
+}
+
+function snapshotScores(room) {
+  const scores = {};
+  for (const player of room.players.values()) scores[player.id] = player.score;
+  return scores;
 }
 
 function finalizeGuess(room, targetId, automatic = false) {
@@ -505,7 +575,9 @@ function finalizeGuess(room, targetId, automatic = false) {
   const catcher = room.players.get(room.catcherId);
   const chameleon = room.players.get(room.chameleonId);
   const caught = targetId === room.chameleonId;
+  const scoreBefore = snapshotScores(room);
   const deltas = scoreRound(room, caught);
+  const scoreAfter = snapshotScores(room);
 
   room.result = {
     automatic,
@@ -516,16 +588,19 @@ function finalizeGuess(room, targetId, automatic = false) {
     catcherName: catcher?.name || "Catcher",
     chameleonName: chameleon?.name || "Chameleon",
     guessedName: target?.name || "Someone",
-    headline: caught ? "SUCCESS" : "Chameleon WINS (fools everyone)",
+    headline: caught ? "SUCCESS" : "FOOLS",
     verdictLine: caught
       ? `Catcher ${catcher?.name || "Catcher"} caught the Chameleon ${chameleon?.name || "Chameleon"}`
       : `Catcher ${catcher?.name || "Catcher"} picked ${target?.name || "someone"}, but ${chameleon?.name || "Chameleon"} was the Chameleon`,
     tagline: caught ? randomChoice(SUCCESS_TAGLINES) : randomChoice(CHAMELEON_TAGLINES),
     deltas,
+    scoreBefore,
+    scoreAfter,
+    revealDelayMs: 5000,
     resolvedAt: Date.now(),
   };
 
-  transitionTo(room, "verdict", 10);
+  transitionTo(room, "verdict", null);
 }
 
 function visibleRoleFor(room, viewer, player) {
@@ -541,9 +616,7 @@ function visibleWordFor(room, player) {
   if (room.phase === "roleReveal" || room.phase === "drawing") {
     return player.role === ROLE.INKSTER ? room.word : null;
   }
-  if (room.phase === "judgement" || room.phase === "verdict") {
-    return room.word;
-  }
+  if (room.phase === "judgement" || room.phase === "verdict") return room.word;
   return null;
 }
 
@@ -575,6 +648,10 @@ function stateFor(room, viewer, notice) {
     phase: room.phase,
     phaseEndsAt: room.phaseEndsAt,
     round: room.round,
+    match: room.match,
+    matchIndex: room.matchIndex,
+    totalMatches: totalMatches(room),
+    matchesPerRound: MATCHES_PER_ROUND,
     settings: room.settings,
     hostId: room.hostId,
     catcherId: room.catcherId,
@@ -583,6 +660,7 @@ function stateFor(room, viewer, notice) {
     notice: notice || null,
     me: {
       id: viewer.id,
+      token: viewer.token,
       name: viewer.name,
       role: viewer.role,
       isHost: viewer.id === room.hostId,
@@ -606,16 +684,8 @@ function broadcastState(room, notice) {
   ensureHost(room);
   for (const player of room.players.values()) {
     if (!player.connected) continue;
-    const client = clients.get(player.id);
+    const client = clientsByPlayerId.get(player.id);
     if (client) send(client, "state", stateFor(room, player, notice));
-  }
-}
-
-function broadcastRoom(room, type, payload) {
-  for (const player of room.players.values()) {
-    if (!player.connected) continue;
-    const client = clients.get(player.id);
-    if (client) send(client, type, payload);
   }
 }
 
@@ -628,7 +698,7 @@ function canReceiveCanvasEvent(room, viewer, ownerId) {
 function broadcastCanvasEvent(room, ownerId, type, payload) {
   for (const player of room.players.values()) {
     if (!player.connected || !canReceiveCanvasEvent(room, player, ownerId)) continue;
-    const client = clients.get(player.id);
+    const client = clientsByPlayerId.get(player.id);
     if (client) send(client, type, payload);
   }
 }
@@ -638,7 +708,7 @@ function handleMessage(client, message) {
 
   if (type === "createRoom") {
     const room = createRoom();
-    addPlayerToRoom(room, client, payload.name);
+    addPlayerToRoom(room, client, payload.name, payload.token);
     return;
   }
 
@@ -650,15 +720,25 @@ function handleMessage(client, message) {
       return;
     }
     if (room.phase !== "lobby" && room.phase !== "gameOver") {
-      send(client, "error", { message: "That round is already running. Join the next lobby." });
+      const resumed = resumePlayer(room, client, payload.name, payload.token);
+      if (!resumed) send(client, "error", { message: "That round is already running. Join the next lobby." });
       return;
     }
-    if (room.players.size >= 12) {
+    if (room.players.size >= 12 && !findPlayerByToken(room, normalizeToken(payload.token))) {
       send(client, "error", { message: "Room is full." });
       return;
     }
     if (room.phase === "gameOver") resetToLobby(room);
-    addPlayerToRoom(room, client, payload.name);
+    addPlayerToRoom(room, client, payload.name, payload.token);
+    return;
+  }
+
+  if (type === "resume") {
+    const code = String(payload.roomCode || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+    const room = rooms.get(code);
+    if (!room || !resumePlayer(room, client, payload.name, payload.token)) {
+      send(client, "resumeFailed", {});
+    }
     return;
   }
 
@@ -693,7 +773,7 @@ function handleMessage(client, message) {
     const stroke = sanitizeStroke(payload);
     if (!canvas || !stroke) return;
     canvas.strokes.push(stroke);
-    if (canvas.strokes.length > 5000) canvas.strokes.splice(0, canvas.strokes.length - 5000);
+    if (canvas.strokes.length > 8000) canvas.strokes.splice(0, canvas.strokes.length - 8000);
     broadcastCanvasEvent(room, player.id, "stroke", { playerId: player.id, stroke });
     return;
   }
@@ -719,6 +799,13 @@ function handleMessage(client, message) {
   if (type === "finalGuess") {
     if (room.phase !== "judgement" || player.id !== room.catcherId) return;
     finalizeGuess(room, payload.targetId, false);
+    return;
+  }
+
+  if (type === "nextMatch") {
+    if (player.id !== room.hostId || room.phase !== "verdict") return;
+    if (room.matchIndex >= totalMatches(room)) transitionToGameOver(room);
+    else startNextMatch(room);
     return;
   }
 
@@ -759,136 +846,41 @@ function serveStatic(req, res) {
   });
 }
 
-function sendFrame(client, payload, opcode = 0x1) {
-  if (!client.socket || client.socket.destroyed) return;
-  const data = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload));
-  let header;
-
-  if (data.length < 126) {
-    header = Buffer.from([0x80 | opcode, data.length]);
-  } else if (data.length < 65536) {
-    header = Buffer.alloc(4);
-    header[0] = 0x80 | opcode;
-    header[1] = 126;
-    header.writeUInt16BE(data.length, 2);
-  } else {
-    header = Buffer.alloc(10);
-    header[0] = 0x80 | opcode;
-    header[1] = 127;
-    header.writeBigUInt64BE(BigInt(data.length), 2);
-  }
-
-  client.socket.write(Buffer.concat([header, data]));
-}
-
 function send(client, type, payload = {}) {
-  sendFrame(client, JSON.stringify({ type, payload }));
-}
-
-function parseFrames(client, chunk) {
-  client.buffer = Buffer.concat([client.buffer, chunk]);
-
-  while (client.buffer.length >= 2) {
-    const first = client.buffer[0];
-    const second = client.buffer[1];
-    const opcode = first & 0x0f;
-    const masked = (second & 0x80) === 0x80;
-    let length = second & 0x7f;
-    let offset = 2;
-
-    if (length === 126) {
-      if (client.buffer.length < offset + 2) return;
-      length = client.buffer.readUInt16BE(offset);
-      offset += 2;
-    } else if (length === 127) {
-      if (client.buffer.length < offset + 8) return;
-      const bigLength = client.buffer.readBigUInt64BE(offset);
-      if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) {
-        client.socket.destroy();
-        return;
-      }
-      length = Number(bigLength);
-      offset += 8;
-    }
-
-    const maskLength = masked ? 4 : 0;
-    if (client.buffer.length < offset + maskLength + length) return;
-
-    let mask;
-    if (masked) {
-      mask = client.buffer.slice(offset, offset + 4);
-      offset += 4;
-    }
-
-    const payload = client.buffer.slice(offset, offset + length);
-    client.buffer = client.buffer.slice(offset + length);
-
-    if (opcode === 0x8) {
-      client.socket.end();
-      return;
-    }
-
-    if (opcode === 0x9) {
-      sendFrame(client, payload, 0x0a);
-      continue;
-    }
-
-    if (opcode !== 0x1) continue;
-
-    if (masked) {
-      for (let index = 0; index < payload.length; index += 1) {
-        payload[index] ^= mask[index % 4];
-      }
-    }
-
-    try {
-      handleMessage(client, JSON.parse(payload.toString("utf8")));
-    } catch (error) {
-      send(client, "error", { message: "Bad socket message." });
-    }
-  }
+  if (!client.ws || client.ws.readyState !== client.ws.OPEN) return;
+  client.ws.send(JSON.stringify({ type, payload }));
 }
 
 const server = http.createServer(serveStatic);
+const wss = new WebSocketServer({ server });
 
-server.on("upgrade", (req, socket) => {
-  const key = req.headers["sec-websocket-key"];
-  if (!key) {
-    socket.destroy();
-    return;
-  }
-
-  const accept = crypto.createHash("sha1").update(`${key}${WS_GUID}`).digest("base64");
-  socket.write(
-    [
-      "HTTP/1.1 101 Switching Protocols",
-      "Upgrade: websocket",
-      "Connection: Upgrade",
-      `Sec-WebSocket-Accept: ${accept}`,
-      "",
-      "",
-    ].join("\r\n"),
-  );
-
+wss.on("connection", (ws) => {
   const client = {
-    id: makeId("player"),
-    socket,
-    buffer: Buffer.alloc(0),
+    id: makeId("conn"),
+    ws,
     roomCode: null,
     playerId: null,
+    replaced: false,
   };
 
-  clients.set(client.id, client);
   send(client, "hello", { id: client.id });
 
-  socket.on("data", (chunk) => parseFrames(client, chunk));
-  socket.on("close", () => {
-    leaveCurrentRoom(client);
-    clients.delete(client.id);
+  ws.on("message", (data, isBinary) => {
+    if (isBinary) return;
+    try {
+      handleMessage(client, JSON.parse(data.toString("utf8")));
+    } catch (error) {
+      console.error("Socket message failed:", error);
+      send(client, "error", { message: "Socket message failed." });
+    }
   });
-  socket.on("error", () => {
-    leaveCurrentRoom(client);
-    clients.delete(client.id);
+
+  ws.on("close", () => {
+    if (!client.replaced) detachClient(client);
+  });
+
+  ws.on("error", () => {
+    if (!client.replaced) detachClient(client);
   });
 });
 
