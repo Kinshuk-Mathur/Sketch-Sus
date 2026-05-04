@@ -1,0 +1,18 @@
+{
+  "name": "sketch-and-sus",
+  "version": "1.0.0",
+  "description": "A multiplayer drawing bluff game with native WebSockets.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "websocket",
+    "drawing",
+    "multiplayer",
+    "game"
+  ],
+  "author": "",
+  "license": "UNLICENSED"
+}
