@@ -51,8 +51,9 @@ function send(type, payload = {}) {
 }
 
 function connect() {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  socket = new WebSocket(`${protocol}//${window.location.host}`);
+  const serverUrl = new URL(window.SKETCH_SUS_SERVER || window.location.origin);
+  serverUrl.protocol = serverUrl.protocol === "https:" ? "wss:" : "ws:";
+  socket = new WebSocket(serverUrl.toString());
 
   socket.addEventListener("open", () => render());
   socket.addEventListener("message", (event) => {
