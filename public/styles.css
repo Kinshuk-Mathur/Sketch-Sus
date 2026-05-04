@@ -575,15 +575,27 @@ input:disabled {
   filter: saturate(0.4);
 }
 
+.role-character {
+  width: min(240px, 62vw);
+  aspect-ratio: 1;
+  object-fit: contain;
+  filter: drop-shadow(8px 8px 0 rgba(0, 0, 0, 0.55));
+}
+
 .draw-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 310px;
   gap: 18px;
 }
 
+.draw-layout.is-solo {
+  grid-template-columns: 1fr;
+}
+
 .draw-main,
 .catcher-stage,
-.vote-stage,
+.catcher-timer-stage,
+.judgement-stage,
 .verdict-stage,
 .final-board {
   padding: 20px;
@@ -693,6 +705,38 @@ input:disabled {
   min-height: 720px;
 }
 
+.catcher-timer-stage {
+  min-height: 720px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.catcher-timer-character {
+  width: min(220px, 54vw);
+  max-height: 240px;
+  object-fit: contain;
+  filter: drop-shadow(8px 8px 0 rgba(0, 0, 0, 0.55));
+}
+
+.mega-timer {
+  margin: 0;
+  color: var(--gold);
+  font-size: clamp(6rem, 18vw, 14rem);
+  line-height: 0.9;
+  text-shadow:
+    6px 6px 0 var(--ink),
+    11px 11px 0 var(--pink);
+}
+
+.catcher-timer-stage strong {
+  max-width: 680px;
+  color: #fff;
+  font-size: 1.35rem;
+}
+
 .suspect-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -747,20 +791,6 @@ input:disabled {
   font-size: 0.82rem;
 }
 
-.vote-meter {
-  height: 13px;
-  overflow: hidden;
-  border: 2px solid var(--ink);
-  border-radius: 999px;
-  background: rgba(26, 11, 43, 0.1);
-}
-
-.vote-meter i {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, var(--cyan), var(--pink));
-}
-
 .judgement-bar {
   justify-content: center;
   min-height: 76px;
@@ -782,6 +812,13 @@ input:disabled {
   gap: 8px;
   place-items: center;
   text-align: center;
+}
+
+.verdict-character {
+  width: min(210px, 52vw);
+  max-height: 230px;
+  object-fit: contain;
+  filter: drop-shadow(8px 8px 0 rgba(0, 0, 0, 0.55));
 }
 
 .verdict-copy h1 {
@@ -960,7 +997,8 @@ input:disabled {
   .lobby-hero,
   .draw-main,
   .catcher-stage,
-  .vote-stage,
+  .catcher-timer-stage,
+  .judgement-stage,
   .verdict-stage,
   .final-board {
     padding: 14px;

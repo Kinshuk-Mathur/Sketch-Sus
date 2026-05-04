@@ -13,7 +13,14 @@ const ROLE_ICON = {
   catcher: "🔍",
 };
 
+const ROLE_ASSET = {
+  inkster: "/assets/inkster.png",
+  chameleon: "/assets/chameleon.png",
+  catcher: "/assets/catcher.png",
+};
+
 const PALETTE = ["#0f65b7", "#1a0b2b", "#1e356b", "#f4a60d", "#e83f99", "#e9d4b3", "#b24023", "#a1b4bc", "#90930f", "#11b3e1"];
+const STROKE_CHUNK_SIZE = 420;
 
 let socket = null;
 let state = null;
@@ -99,14 +106,13 @@ function connect() {
 }
 
 function shouldKeepSelection(phase) {
-  return phase === "judgement" || phase === "voting";
+  return phase === "judgement";
 }
 
 function handlePhaseSound(previous, next) {
   if (!previous) return;
   if (next === "roleReveal") sfx.play("start");
   if (next === "drawing") sfx.play("drawStart");
-  if (next === "voting") sfx.play("vote");
   if (next === "judgement") sfx.play("lock");
   if (next === "gameOver") sfx.play("success");
   lastPhase = next;
@@ -136,6 +142,10 @@ function roleName(role) {
   return role ? `${ROLE_ICON[role] || ""} ${ROLE_LABEL[role] || role}` : "Mystery";
 }
 
+function roleAsset(role) {
+  return ROLE_ASSET[role] || ROLE_ASSET.inkster;
+}
+
 function myPlayer() {
   return state?.players.find((player) => player.id === state.me.id);
 }
@@ -157,10 +167,6 @@ function canvasFor(playerId) {
   return canvas;
 }
 
-function totalVotes() {
-  return Object.values(state?.votes || {}).reduce((sum, count) => sum + count, 0);
-}
-
 function inviteLink() {
   const url = new URL(window.location.href);
   url.searchParams.set("room", state.roomCode);
@@ -177,7 +183,6 @@ function render() {
     lobby: renderLobby,
     roleReveal: renderRoleReveal,
     drawing: renderDrawing,
-    voting: renderVoting,
     judgement: renderJudgement,
     verdict: renderVerdict,
     gameOver: renderGameOver,
@@ -282,7 +287,7 @@ function renderLobby() {
         </div>
         ${renderSetting("rounds", "Rounds", state.settings.rounds, 1, 10, isHost)}
         ${renderSetting("drawSeconds", "Draw time", state.settings.drawSeconds, 30, 180, isHost)}
-        ${renderSetting("voteSeconds", "Vote time", state.settings.voteSeconds, 15, 60, isHost)}
+        ${renderSetting("judgementSeconds", "Catcher time", state.settings.judgementSeconds, 20, 60, isHost)}
         <div class="math-lock">
           <strong>Fairness engine</strong>
           <span>Reservoir weights + Gaussian noise + role cooldowns</span>
@@ -318,6 +323,7 @@ function renderRoleReveal() {
   const catcher = playerById(state.catcherId);
   return `
     <section class="reveal-stage dark-panel role-${role}">
+      <img class="role-character" src="${roleAsset(role)}" alt="${ROLE_LABEL[role]} character" />
       <p class="eyebrow">Role flash</p>
       <h1>${roleName(role)}</h1>
       <div class="role-chip-line">
@@ -341,7 +347,7 @@ function renderDrawing() {
 function renderDrawerStage() {
   const isChameleon = state.me.role === "chameleon";
   return `
-    <section class="draw-layout">
+    <section class="draw-layout ${isChameleon ? "" : "is-solo"}">
       <div class="draw-main dark-panel">
         <div class="draw-head">
           <div>
@@ -353,18 +359,22 @@ function renderDrawerStage() {
         ${renderToolbar()}
         <canvas id="drawingCanvas" class="drawing-canvas" width="1400" height="875" aria-label="Your drawing canvas"></canvas>
       </div>
-      <aside class="watch-panel">
-        <div class="panel-heading">
-          <h2>${isChameleon ? "Blur feed" : "Table pulse"}</h2>
-          <span>${isChameleon ? "Copy carefully" : "Live round"}</span>
-        </div>
-        <div class="mini-grid ${isChameleon ? "is-blurred" : ""}">
-          ${drawingPlayers()
-            .filter((player) => player.id !== state.me.id)
-            .map((player) => renderMiniCanvas(player))
-            .join("")}
-        </div>
-      </aside>
+      ${
+        isChameleon
+          ? `<aside class="watch-panel">
+              <div class="panel-heading">
+                <h2>Blur feed</h2>
+                <span>Copy carefully</span>
+              </div>
+              <div class="mini-grid is-blurred">
+                ${drawingPlayers()
+                  .filter((player) => player.id !== state.me.id)
+                  .map((player) => renderMiniCanvas(player))
+                  .join("")}
+              </div>
+            </aside>`
+          : ""
+      }
     </section>
   `;
 }
@@ -393,17 +403,11 @@ function renderToolbar() {
 
 function renderCatcherLive() {
   return `
-    <section class="catcher-stage dark-panel">
-      <div class="draw-head">
-        <div>
-          <p class="eyebrow">${roleName("catcher")}</p>
-          <h1>Watch every canvas</h1>
-        </div>
-        <div class="timer-badge"><span class="js-timer">${formatTimer()}</span></div>
-      </div>
-      <div class="suspect-grid live">
-        ${drawingPlayers().map((player) => renderDrawingTile(player, { locked: true })).join("")}
-      </div>
+    <section class="catcher-timer-stage dark-panel">
+      <img class="catcher-timer-character" src="${roleAsset("catcher")}" alt="Catcher character" />
+      <p class="eyebrow">${roleName("catcher")}</p>
+      <h1 class="mega-timer js-timer">${formatTimer()}</h1>
+      <strong>Drawings unlock after the timer.</strong>
     </section>
   `;
 }
@@ -417,64 +421,51 @@ function renderMiniCanvas(player) {
   `;
 }
 
-function renderVoting() {
-  const voted = Boolean(state.me.vote);
+function renderJudgement() {
+  const isCatcher = state.me.id === state.catcherId;
+  if (!isCatcher) return renderWaitingJudgement();
+
   return `
-    <section class="vote-stage dark-panel">
+    <section class="judgement-stage dark-panel">
       <div class="draw-head">
         <div>
-          <p class="eyebrow">Word revealed: ${escapeHtml(state.word || "")}</p>
-          <h1>${voted ? "Vote locked" : "Tap the sus drawing"}</h1>
+          <p class="eyebrow">Final decision</p>
+          <h1>Catcher, lock the Chameleon</h1>
         </div>
         <div class="timer-badge"><span class="js-timer">${formatTimer()}</span></div>
       </div>
       <div class="suspect-grid">
-        ${drawingPlayers().map((player) => renderDrawingTile(player, { voting: true, voted })).join("")}
+        ${drawingPlayers().map((player) => renderDrawingTile(player, { judgement: true })).join("")}
       </div>
+      <div class="judgement-bar"><button class="primary-btn" data-action="finalGuess" ${selectedTarget ? "" : "disabled"}>Check drawing</button></div>
     </section>
   `;
 }
 
-function renderJudgement() {
-  const isCatcher = state.me.id === state.catcherId;
+function renderWaitingJudgement() {
   return `
-    <section class="vote-stage dark-panel">
-      <div class="draw-head">
-        <div>
-          <p class="eyebrow">Final decision</p>
-          <h1>${isCatcher ? "Catcher, lock the Chameleon" : "Catcher is choosing"}</h1>
-        </div>
-        <div class="timer-badge"><span class="js-timer">${formatTimer()}</span></div>
-      </div>
-      <div class="suspect-grid">
-        ${drawingPlayers().map((player) => renderDrawingTile(player, { judgement: isCatcher })).join("")}
-      </div>
-      ${
-        isCatcher
-          ? `<div class="judgement-bar"><button class="primary-btn" data-action="finalGuess" ${selectedTarget ? "" : "disabled"}>Check drawing</button></div>`
-          : `<div class="judgement-bar"><span>Votes are advisory. Catcher has the final click.</span></div>`
-      }
+    <section class="catcher-timer-stage dark-panel wait-stage">
+      <img class="catcher-timer-character" src="${roleAsset(state.me.role)}" alt="${ROLE_LABEL[state.me.role]} character" />
+      <p class="eyebrow">Final decision</p>
+      <h1 class="mega-timer js-timer">${formatTimer()}</h1>
+      <strong>Catcher is choosing the Chameleon.</strong>
     </section>
   `;
 }
 
 function renderDrawingTile(player, mode = {}) {
-  const votes = state.votes[player.id] || 0;
-  const voteTotal = Math.max(1, totalVotes());
-  const votePercent = clamp((votes / voteTotal) * 100, 0, 100);
   const isSelected = selectedTarget === player.id;
-  const isMyVote = state.me.vote === player.id;
-  const canClick = (mode.voting && !mode.voted) || mode.judgement;
+  const canClick = mode.judgement;
   const roleBadge = player.role && state.phase === "verdict" ? roleName(player.role) : "";
+  const meta = roleBadge || (canClick ? "Click to accuse" : "Drawing");
 
   return `
-    <article class="drawing-tile ${canClick ? "is-clickable" : ""} ${isSelected || isMyVote ? "is-selected" : ""}" data-action="${canClick ? "pickTarget" : ""}" data-target="${player.id}">
+    <article class="drawing-tile ${canClick ? "is-clickable" : ""} ${isSelected ? "is-selected" : ""}" data-action="${canClick ? "pickTarget" : ""}" data-target="${player.id}">
       <canvas data-preview-id="${player.id}" width="700" height="438"></canvas>
       <div class="tile-meta">
         <strong>${escapeHtml(player.name)}</strong>
-        <span>${escapeHtml(roleBadge || `${votes} vote${votes === 1 ? "" : "s"}`)}</span>
+        <span>${escapeHtml(meta)}</span>
       </div>
-      <div class="vote-meter"><i style="width:${votePercent}%"></i></div>
     </article>
   `;
 }
@@ -484,6 +475,7 @@ function renderVerdict() {
   return `
     <section class="verdict-stage dark-panel ${result?.caught ? "is-success" : "is-chameleon"}">
       <div class="verdict-copy">
+        <img class="verdict-character" src="${roleAsset(result?.caught ? "catcher" : "chameleon")}" alt="${result?.caught ? "Catcher" : "Chameleon"} winner character" />
         <p class="eyebrow">${escapeHtml(result?.verdictLine || "")}</p>
         <h1 id="verdictPulse">3</h1>
         <strong id="verdictTagline">${escapeHtml(result?.tagline || "")}</strong>
@@ -622,11 +614,14 @@ function mountDrawingCanvas() {
 
   canvas.onpointermove = (event) => {
     if (!activeStroke) return;
-    const point = canvasPoint(canvas, event);
-    const previous = activeStroke.points[activeStroke.points.length - 1];
-    if (Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0025) return;
-    activeStroke.points.push(point);
-    drawSegment(canvas, previous, point, activeStroke);
+    const events = event.getCoalescedEvents?.() || [event];
+    for (const pointerEvent of events) {
+      const point = canvasPoint(canvas, pointerEvent);
+      const previous = activeStroke.points[activeStroke.points.length - 1];
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0016) continue;
+      activeStroke.points.push(point);
+      drawSegment(canvas, previous, point, activeStroke);
+    }
   };
 
   canvas.onpointerup = endStroke;
@@ -638,8 +633,24 @@ function mountDrawingCanvas() {
 
 function endStroke() {
   if (!activeStroke) return;
-  if (activeStroke.points.length > 1) send("stroke", activeStroke);
+  if (activeStroke.points.length > 1) {
+    for (const stroke of splitStroke(activeStroke)) send("stroke", stroke);
+  }
   activeStroke = null;
+}
+
+function splitStroke(stroke) {
+  if (stroke.points.length <= STROKE_CHUNK_SIZE) return [stroke];
+  const chunks = [];
+  for (let index = 0; index < stroke.points.length - 1; index += STROKE_CHUNK_SIZE - 1) {
+    chunks.push({
+      color: stroke.color,
+      width: stroke.width,
+      tool: stroke.tool,
+      points: stroke.points.slice(index, index + STROKE_CHUNK_SIZE),
+    });
+  }
+  return chunks.filter((chunk) => chunk.points.length > 1);
 }
 
 function canvasPoint(canvas, event) {
@@ -691,6 +702,7 @@ function redrawMainCanvas() {
 
 function drawPlayerCanvas(canvas, playerId) {
   const context = canvas.getContext("2d");
+  context.imageSmoothingEnabled = true;
   context.clearRect(0, 0, canvas.width, canvas.height);
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, canvas.width, canvas.height);
@@ -708,9 +720,15 @@ function drawStroke(context, stroke, width, height) {
   context.lineWidth = stroke.width;
   context.beginPath();
   context.moveTo(stroke.points[0].x * width, stroke.points[0].y * height);
-  for (const point of stroke.points.slice(1)) {
-    context.lineTo(point.x * width, point.y * height);
+  for (let index = 1; index < stroke.points.length - 1; index += 1) {
+    const current = stroke.points[index];
+    const next = stroke.points[index + 1];
+    const midX = ((current.x + next.x) / 2) * width;
+    const midY = ((current.y + next.y) / 2) * height;
+    context.quadraticCurveTo(current.x * width, current.y * height, midX, midY);
   }
+  const last = stroke.points[stroke.points.length - 1];
+  context.lineTo(last.x * width, last.y * height);
   context.stroke();
   context.restore();
 }
@@ -826,11 +844,6 @@ app.addEventListener("click", async (event) => {
 
   if (action === "pickTarget") {
     const targetId = actionTarget.dataset.target;
-    if (state.phase === "voting" && !state.me.vote) {
-      send("vote", { targetId });
-      sfx.play("vote");
-      return;
-    }
     if (state.phase === "judgement" && state.me.id === state.catcherId) {
       selectedTarget = targetId;
       sfx.play("click");
@@ -885,10 +898,6 @@ function createSfx() {
         remoteStroke: [[180, 0.018, "sine", 0]],
         clear: [[120, 0.09, "sawtooth", 0]],
         undo: [[260, 0.05, "triangle", 0]],
-        vote: [
-          [620, 0.05, "triangle", 0],
-          [420, 0.08, "triangle", 0.045],
-        ],
         lock: [
           [160, 0.12, "square", 0],
           [90, 0.16, "sine", 0.08],

@@ -148,8 +148,8 @@ function createRoom() {
     players: new Map(),
     settings: {
       rounds: 5,
-      drawSeconds: 75,
-      voteSeconds: 25,
+      drawSeconds: 80,
+      judgementSeconds: 40,
     },
     phase: "lobby",
     phaseEndsAt: null,
@@ -227,7 +227,6 @@ function addPlayerToRoom(room, client, name) {
       [ROLE.CATCHER]: 0,
     },
     lastSpecialRound: 0,
-    vote: null,
     color: PLAYER_COLORS[room.players.size % PLAYER_COLORS.length],
   };
 
@@ -242,7 +241,6 @@ function addPlayerToRoom(room, client, name) {
 
 function resetPlayerRoundState(player) {
   player.role = null;
-  player.vote = null;
 }
 
 function resetPlayerGameState(player) {
@@ -321,7 +319,6 @@ function assignRoles(room, players) {
   for (const player of players) {
     const role = assignments.get(player.id);
     player.role = role;
-    player.vote = null;
     player.roleCounts[role] = (player.roleCounts[role] || 0) + 1;
     if (role === ROLE.CATCHER) room.catcherId = player.id;
     if (role === ROLE.CHAMELEON) room.chameleonId = player.id;
@@ -421,12 +418,7 @@ function onPhaseTimeout(code, phase) {
   }
 
   if (phase === "drawing") {
-    transitionTo(room, "voting", room.settings.voteSeconds);
-    return;
-  }
-
-  if (phase === "voting") {
-    transitionTo(room, "judgement", 45);
+    transitionTo(room, "judgement", room.settings.judgementSeconds);
     return;
   }
 
@@ -443,15 +435,15 @@ function onPhaseTimeout(code, phase) {
 function sanitizeSettings(input, existing) {
   return {
     rounds: clamp(Math.round(Number(input.rounds ?? existing.rounds)), 1, 10),
-    drawSeconds: clamp(Math.round(Number(input.drawSeconds ?? existing.drawSeconds)), 30, 180),
-    voteSeconds: clamp(Math.round(Number(input.voteSeconds ?? existing.voteSeconds)), 15, 60),
+    drawSeconds: clamp(Math.round(Number(input.drawSeconds ?? existing.drawSeconds)), 40, 180),
+    judgementSeconds: clamp(Math.round(Number(input.judgementSeconds ?? existing.judgementSeconds)), 20, 60),
   };
 }
 
 function sanitizeStroke(input) {
   const points = Array.isArray(input.points)
     ? input.points
-        .slice(0, 800)
+        .slice(0, 6000)
         .map((point) => ({
           x: clamp(Number(point.x), 0, 1),
           y: clamp(Number(point.y), 0, 1),
@@ -477,20 +469,9 @@ function canDraw(room, player) {
   return room.phase === "drawing" && (player.role === ROLE.INKSTER || player.role === ROLE.CHAMELEON);
 }
 
-function voteCounts(room) {
-  const counts = {};
-  for (const player of room.players.values()) {
-    if (player.vote) counts[player.vote] = (counts[player.vote] || 0) + 1;
-  }
-  return counts;
-}
-
 function pickAutomaticGuess(room) {
   const drawingIds = activeDrawingPlayers(room).map((player) => player.id);
-  const counts = voteCounts(room);
-  const topScore = Math.max(0, ...drawingIds.map((id) => counts[id] || 0));
-  const top = drawingIds.filter((id) => (counts[id] || 0) === topScore);
-  return randomChoice(top);
+  return drawingIds.length ? randomChoice(drawingIds) : room.chameleonId;
 }
 
 function scoreRound(room, caught) {
@@ -517,7 +498,7 @@ function scoreRound(room, caught) {
 }
 
 function finalizeGuess(room, targetId, automatic = false) {
-  if (room.phase !== "judgement" && room.phase !== "voting") return;
+  if (room.phase !== "judgement") return;
   const target = room.players.get(targetId);
   if (!target || target.role === ROLE.CATCHER) return;
 
@@ -560,14 +541,29 @@ function visibleWordFor(room, player) {
   if (room.phase === "roleReveal" || room.phase === "drawing") {
     return player.role === ROLE.INKSTER ? room.word : null;
   }
-  if (room.phase === "voting" || room.phase === "judgement" || room.phase === "verdict") {
+  if (room.phase === "judgement" || room.phase === "verdict") {
     return room.word;
   }
   return null;
 }
 
-function serializeCanvases(room) {
-  return [...room.canvases.values()].map((canvas) => ({
+function serializeCanvases(room, viewer) {
+  let canvases = [...room.canvases.values()];
+
+  if (room.phase === "drawing") {
+    if (viewer.role === ROLE.CATCHER) canvases = [];
+    if (viewer.role === ROLE.INKSTER) canvases = canvases.filter((canvas) => canvas.playerId === viewer.id);
+  }
+
+  if (room.phase === "roleReveal") {
+    canvases = canvases.filter((canvas) => canvas.playerId === viewer.id);
+  }
+
+  if (room.phase === "judgement" && viewer.role !== ROLE.CATCHER) {
+    canvases = canvases.filter((canvas) => canvas.playerId === viewer.id);
+  }
+
+  return canvases.map((canvas) => ({
     playerId: canvas.playerId,
     strokes: canvas.strokes,
   }));
@@ -589,7 +585,6 @@ function stateFor(room, viewer, notice) {
       id: viewer.id,
       name: viewer.name,
       role: viewer.role,
-      vote: viewer.vote,
       isHost: viewer.id === room.hostId,
     },
     players: [...room.players.values()].map((player) => ({
@@ -602,8 +597,7 @@ function stateFor(room, viewer, notice) {
       role: visibleRoleFor(room, viewer, player),
       roleCounts: player.id === viewer.id || room.phase === "gameOver" ? player.roleCounts : null,
     })),
-    canvases: serializeCanvases(room),
-    votes: voteCounts(room),
+    canvases: serializeCanvases(room, viewer),
     result: room.result,
   };
 }
@@ -620,6 +614,20 @@ function broadcastState(room, notice) {
 function broadcastRoom(room, type, payload) {
   for (const player of room.players.values()) {
     if (!player.connected) continue;
+    const client = clients.get(player.id);
+    if (client) send(client, type, payload);
+  }
+}
+
+function canReceiveCanvasEvent(room, viewer, ownerId) {
+  if (viewer.id === ownerId) return true;
+  if (room.phase === "drawing") return viewer.role === ROLE.CHAMELEON;
+  return true;
+}
+
+function broadcastCanvasEvent(room, ownerId, type, payload) {
+  for (const player of room.players.values()) {
+    if (!player.connected || !canReceiveCanvasEvent(room, player, ownerId)) continue;
     const client = clients.get(player.id);
     if (client) send(client, type, payload);
   }
@@ -685,8 +693,8 @@ function handleMessage(client, message) {
     const stroke = sanitizeStroke(payload);
     if (!canvas || !stroke) return;
     canvas.strokes.push(stroke);
-    if (canvas.strokes.length > 700) canvas.strokes.splice(0, canvas.strokes.length - 700);
-    broadcastRoom(room, "stroke", { playerId: player.id, stroke });
+    if (canvas.strokes.length > 5000) canvas.strokes.splice(0, canvas.strokes.length - 5000);
+    broadcastCanvasEvent(room, player.id, "stroke", { playerId: player.id, stroke });
     return;
   }
 
@@ -695,7 +703,7 @@ function handleMessage(client, message) {
     const canvas = room.canvases.get(player.id);
     if (!canvas) return;
     canvas.strokes = [];
-    broadcastRoom(room, "canvasClear", { playerId: player.id });
+    broadcastCanvasEvent(room, player.id, "canvasClear", { playerId: player.id });
     return;
   }
 
@@ -704,20 +712,7 @@ function handleMessage(client, message) {
     const canvas = room.canvases.get(player.id);
     if (!canvas || canvas.strokes.length === 0) return;
     const stroke = canvas.strokes.pop();
-    broadcastRoom(room, "canvasUndo", { playerId: player.id, strokeId: stroke.id });
-    return;
-  }
-
-  if (type === "vote") {
-    if (room.phase !== "voting") return;
-    if (player.vote) {
-      send(client, "error", { message: "One vote only. The table saw that." });
-      return;
-    }
-    const target = room.players.get(payload.targetId);
-    if (!target || target.role === ROLE.CATCHER) return;
-    player.vote = target.id;
-    broadcastState(room);
+    broadcastCanvasEvent(room, player.id, "canvasUndo", { playerId: player.id, strokeId: stroke.id });
     return;
   }
 
