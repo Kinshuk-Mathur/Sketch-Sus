@@ -64,7 +64,9 @@ let entryRoom = urlRoom.toUpperCase();
 let currentRoomCode = localStorage.getItem("sketchSus:room") || "";
 const playerToken = getOrCreatePlayerToken();
 
+const music = createBackgroundMusic();
 const sfx = createSfx();
+music.start();
 
 function getOrCreatePlayerToken() {
   const saved = localStorage.getItem("sketchSus:token");
@@ -328,6 +330,7 @@ function renderEntry(label = "Ready") {
           <div class="entry-actions">
             <button class="primary-btn" type="button" data-action="createRoom">Create room</button>
             <button class="secondary-btn" type="button" data-action="joinRoom">Join room</button>
+            ${renderSoundMenu("entry")}
           </div>
         </form>
       </section>
@@ -352,12 +355,36 @@ function renderTopbar() {
       </div>
       <div class="room-tools">
         <button class="icon-btn room-code" data-action="copyLink" title="Copy invite link">${state.roomCode}</button>
-        <button class="icon-btn" data-action="toggleSound" title="Toggle sound">${sfx.enabled ? "Sound on" : "Muted"}</button>
+        ${renderSoundMenu("topbar")}
         <button class="icon-btn" data-action="leaveRoom" title="Leave this room">Leave</button>
         ${state.me.isHost ? `<button class="icon-btn danger" data-action="dumpRoom" title="Delete this room for everyone">Dump room</button>` : ""}
       </div>
     </header>
   `;
+}
+
+function renderSoundMenu(variant = "") {
+  return `
+    <div class="sound-menu sound-menu-${variant}">
+      <button class="icon-btn" type="button" data-action="toggleSound" title="Toggle sound">
+        <span class="sound-toggle-label">${isSoundOn() ? "Sound on" : "Muted"}</span>
+      </button>
+      <div class="sound-popover" aria-label="Sound controls">
+        <label>
+          <span>Music</span>
+          <input data-volume="music" type="range" min="0" max="100" value="${Math.round(music.volume * 100)}" />
+        </label>
+        <label>
+          <span>SFX</span>
+          <input data-volume="sfx" type="range" min="0" max="100" value="${Math.round(sfx.volume * 100)}" />
+        </label>
+      </div>
+    </div>
+  `;
+}
+
+function isSoundOn() {
+  return (music.enabled && music.volume > 0) || (sfx.enabled && sfx.volume > 0);
 }
 
 function renderScoreboard() {
@@ -997,6 +1024,14 @@ app.addEventListener("input", (event) => {
   if (target.id === "entryName") entryName = target.value;
   if (target.id === "entryRoom") entryRoom = target.value.toUpperCase();
   if (target.dataset.action === "brushSize") brushWidth = Number(target.value);
+  if (target.dataset.volume === "music") {
+    music.setVolume(Number(target.value) / 100);
+    syncSoundLabels();
+  }
+  if (target.dataset.volume === "sfx") {
+    sfx.setVolume(Number(target.value) / 100);
+    syncSoundLabels();
+  }
   if (target.dataset.setting && state?.me.isHost) send("updateSettings", collectSettings());
 });
 
@@ -1029,8 +1064,9 @@ app.addEventListener("click", async (event) => {
   }
 
   if (action === "toggleSound") {
-    sfx.setEnabled(!sfx.enabled);
-    localStorage.setItem("sketchSus:sound", sfx.enabled ? "on" : "off");
+    const next = !isSoundOn();
+    music.setEnabled(next);
+    sfx.setEnabled(next);
     render();
     return;
   }
@@ -1110,17 +1146,68 @@ app.addEventListener("click", async (event) => {
   }
 });
 
+function syncSoundLabels() {
+  document.querySelectorAll(".sound-toggle-label").forEach((label) => {
+    label.textContent = isSoundOn() ? "Sound on" : "Muted";
+  });
+}
+
+function createBackgroundMusic() {
+  const audio = new Audio("/assets/sketch-sus-theme.mp3");
+  audio.loop = true;
+  audio.preload = "auto";
+
+  const musicState = {
+    enabled: localStorage.getItem("sketchSus:music") !== "off",
+    volume: clamp(Number(localStorage.getItem("sketchSus:musicVolume") ?? 45) / 100, 0, 1),
+    start,
+    setEnabled(value) {
+      this.enabled = value;
+      localStorage.setItem("sketchSus:music", value ? "on" : "off");
+      if (value) start();
+      else audio.pause();
+    },
+    setVolume(value) {
+      this.volume = clamp(value, 0, 1);
+      localStorage.setItem("sketchSus:musicVolume", String(Math.round(this.volume * 100)));
+      audio.volume = this.volume;
+      if (this.volume <= 0) audio.pause();
+      if (this.volume > 0 && !this.enabled) this.setEnabled(true);
+      if (this.enabled) start();
+    },
+  };
+
+  audio.volume = musicState.volume;
+
+  function start() {
+    if (!musicState.enabled || musicState.volume <= 0) return;
+    audio.volume = musicState.volume;
+    audio.play().catch(() => {
+      // Browsers often block autoplay until the first user gesture.
+    });
+  }
+
+  return musicState;
+}
+
 function createSfx() {
   let context = null;
   const sfxState = {
     enabled: localStorage.getItem("sketchSus:sound") !== "off",
+    volume: clamp(Number(localStorage.getItem("sketchSus:sfxVolume") ?? 100) / 100, 0, 1),
     unlock,
     setEnabled(value) {
       this.enabled = value;
+      localStorage.setItem("sketchSus:sound", value ? "on" : "off");
       if (value) unlock();
     },
+    setVolume(value) {
+      this.volume = clamp(value, 0, 1);
+      localStorage.setItem("sketchSus:sfxVolume", String(Math.round(this.volume * 100)));
+      if (this.volume > 0 && !this.enabled) this.setEnabled(true);
+    },
     play(name) {
-      if (!this.enabled) return;
+      if (!this.enabled || this.volume <= 0) return;
       unlock();
       if (!context) return;
 
@@ -1182,7 +1269,7 @@ function createSfx() {
     oscillator.type = type;
     oscillator.frequency.setValueAtTime(frequency, start);
     gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(0.05, start + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.05 * sfxState.volume, start + 0.01);
     gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
     oscillator.connect(gain);
     gain.connect(context.destination);
@@ -1197,6 +1284,16 @@ document.addEventListener(
   "pointerdown",
   () => {
     sfx.unlock();
+    music.start();
+  },
+  { once: true },
+);
+
+document.addEventListener(
+  "keydown",
+  () => {
+    sfx.unlock();
+    music.start();
   },
   { once: true },
 );
