@@ -56,6 +56,7 @@ let activeStroke = null;
 let lastVerdictTone = null;
 let lastVerdictKey = null;
 let verdictEffectPlayed = false;
+let soundMenuOpen = false;
 
 const savedName = localStorage.getItem("sketchSus:name") || "";
 const urlRoom = new URLSearchParams(window.location.search).get("room") || "";
@@ -397,11 +398,14 @@ function renderTopbar() {
 
 function renderSoundMenu(variant = "") {
   return `
-    <div class="sound-menu sound-menu-${variant}">
-      <button class="icon-btn" type="button" data-action="toggleSound" title="Toggle sound">
+    <div class="sound-menu sound-menu-${variant} ${soundMenuOpen ? "is-open" : ""}">
+      <button class="icon-btn" type="button" data-action="toggleSoundMenu" title="Sound controls" aria-expanded="${soundMenuOpen ? "true" : "false"}">
         <span class="sound-toggle-label">${isSoundOn() ? "Sound on" : "Muted"}</span>
       </button>
       <div class="sound-popover" aria-label="Sound controls">
+        <button class="sound-mute-btn" type="button" data-action="toggleMute">
+          <span class="sound-mute-label">${isSoundOn() ? "Mute all" : "Unmute all"}</span>
+        </button>
         <label>
           <span>Music</span>
           <input data-volume="music" type="range" min="0" max="100" value="${Math.round(music.volume * 100)}" />
@@ -1070,7 +1074,15 @@ app.addEventListener("input", (event) => {
 app.addEventListener("click", async (event) => {
   sfx.unlock();
   const actionTarget = event.target.closest("[data-action]");
-  if (!actionTarget) return;
+  const soundMenu = event.target.closest(".sound-menu");
+  if (!actionTarget) {
+    if (soundMenu) return;
+    if (soundMenuOpen) {
+      soundMenuOpen = false;
+      render();
+    }
+    return;
+  }
 
   const action = actionTarget.dataset.action;
 
@@ -1095,10 +1107,18 @@ app.addEventListener("click", async (event) => {
     return;
   }
 
-  if (action === "toggleSound") {
+  if (action === "toggleSoundMenu") {
+    soundMenuOpen = !soundMenuOpen;
+    sfx.play("click");
+    render();
+    return;
+  }
+
+  if (action === "toggleMute") {
     const next = !isSoundOn();
     music.setEnabled(next);
     sfx.setEnabled(next);
+    if (next) sfx.play("click");
     render();
     return;
   }
@@ -1181,6 +1201,9 @@ app.addEventListener("click", async (event) => {
 function syncSoundLabels() {
   document.querySelectorAll(".sound-toggle-label").forEach((label) => {
     label.textContent = isSoundOn() ? "Sound on" : "Muted";
+  });
+  document.querySelectorAll(".sound-mute-label").forEach((label) => {
+    label.textContent = isSoundOn() ? "Mute all" : "Unmute all";
   });
 }
 

@@ -201,11 +201,19 @@ input:disabled {
     transform 140ms ease;
 }
 
-.sound-menu:hover .sound-popover,
-.sound-menu:focus-within .sound-popover {
+.sound-menu.is-open .sound-popover {
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0) scale(1);
+}
+
+.sound-mute-btn {
+  min-height: 38px;
+  border: 3px solid var(--ink);
+  border-radius: 8px;
+  color: #fff;
+  background: var(--ink);
+  box-shadow: 3px 3px 0 var(--pink);
 }
 
 .sound-popover label {
@@ -213,7 +221,8 @@ input:disabled {
   gap: 7px;
 }
 
-.sound-popover span {
+.sound-popover span,
+.sound-mute-btn span {
   font-family: Inter, system-ui, sans-serif;
   font-size: 0.8rem;
   font-weight: 1000;
