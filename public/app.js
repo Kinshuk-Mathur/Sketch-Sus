@@ -154,6 +154,26 @@ function connect() {
       return;
     }
 
+    if (message.type === "leftRoom") {
+      currentRoomCode = "";
+      localStorage.removeItem("sketchSus:room");
+      state = null;
+      selectedTarget = null;
+      showToast("You left the room.");
+      renderEntry("Ready");
+      return;
+    }
+
+    if (message.type === "roomClosed") {
+      currentRoomCode = "";
+      localStorage.removeItem("sketchSus:room");
+      state = null;
+      selectedTarget = null;
+      showToast(message.payload.message || "Room deleted by host.");
+      renderEntry("Room closed");
+      return;
+    }
+
     if (message.type === "error") {
       showToast(message.payload.message || "Something went sideways.");
       sfx.play("fail");
@@ -333,6 +353,8 @@ function renderTopbar() {
       <div class="room-tools">
         <button class="icon-btn room-code" data-action="copyLink" title="Copy invite link">${state.roomCode}</button>
         <button class="icon-btn" data-action="toggleSound" title="Toggle sound">${sfx.enabled ? "Sound on" : "Muted"}</button>
+        <button class="icon-btn" data-action="leaveRoom" title="Leave this room">Leave</button>
+        ${state.me.isHost ? `<button class="icon-btn danger" data-action="dumpRoom" title="Delete this room for everyone">Dump room</button>` : ""}
       </div>
     </header>
   `;
@@ -1010,6 +1032,19 @@ app.addEventListener("click", async (event) => {
     sfx.setEnabled(!sfx.enabled);
     localStorage.setItem("sketchSus:sound", sfx.enabled ? "on" : "off");
     render();
+    return;
+  }
+
+  if (action === "leaveRoom") {
+    send("leaveRoom");
+    sfx.play("click");
+    return;
+  }
+
+  if (action === "dumpRoom") {
+    if (!window.confirm("Delete this room for everyone?")) return;
+    send("dumpRoom");
+    sfx.play("fail");
     return;
   }
 

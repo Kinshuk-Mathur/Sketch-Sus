@@ -249,6 +249,51 @@ function detachClient(client) {
   broadcastState(room);
 }
 
+function removePlayerFromRoom(client) {
+  if (!client.roomCode || !client.playerId) return;
+  const room = rooms.get(client.roomCode);
+  if (!room) return;
+  const player = room.players.get(client.playerId);
+  if (!player) return;
+
+  clearTimeout(player.disconnectTimer);
+  clientsByPlayerId.delete(player.id);
+  room.players.delete(player.id);
+  client.roomCode = null;
+  client.playerId = null;
+  send(client, "leftRoom", {});
+
+  if (room.players.size === 0) {
+    clearTimeout(room.timer);
+    rooms.delete(room.code);
+    return;
+  }
+
+  ensureHost(room);
+  if (room.phase !== "lobby" && room.phase !== "gameOver") {
+    resetToLobby(room, `${player.name} left. Room reset.`);
+    return;
+  }
+
+  broadcastState(room, `${player.name} left the room.`);
+}
+
+function dumpRoom(room, message = "Host deleted the room.") {
+  clearTimeout(room.timer);
+
+  for (const player of room.players.values()) {
+    clearTimeout(player.disconnectTimer);
+    const client = clientsByPlayerId.get(player.id);
+    if (!client) continue;
+    clientsByPlayerId.delete(player.id);
+    client.roomCode = null;
+    client.playerId = null;
+    send(client, "roomClosed", { message });
+  }
+
+  rooms.delete(room.code);
+}
+
 function addPlayerToRoom(room, client, name, token) {
   detachClient(client);
   const cleanToken = normalizeToken(token);
@@ -749,6 +794,17 @@ function handleMessage(client, message) {
   }
 
   const { room, player } = context;
+
+  if (type === "leaveRoom") {
+    removePlayerFromRoom(client);
+    return;
+  }
+
+  if (type === "dumpRoom") {
+    if (player.id !== room.hostId) return;
+    dumpRoom(room);
+    return;
+  }
 
   if (type === "updateSettings") {
     if (player.id !== room.hostId || room.phase !== "lobby") return;

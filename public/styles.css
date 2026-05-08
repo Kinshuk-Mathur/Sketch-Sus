@@ -237,6 +237,12 @@ input:disabled {
   background: var(--brick);
 }
 
+.icon-btn.danger {
+  color: #fff;
+  background: var(--brick);
+  box-shadow: 4px 4px 0 var(--gold);
+}
+
 .notice {
   width: min(900px, calc(100% - 32px));
   margin: 16px auto 0;
