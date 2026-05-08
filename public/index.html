@@ -9,12 +9,27 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div id="introSplash" class="intro-splash" aria-hidden="true">
+      <section class="intro-slide intro-catcher">
+        <img src="/assets/catcher.png" alt="" />
+        <strong>CATCHER</strong>
+      </section>
+      <section class="intro-slide intro-inkster">
+        <img src="/assets/inkster.png" alt="" />
+        <strong>INKSTER</strong>
+      </section>
+      <section class="intro-slide intro-chameleon">
+        <img src="/assets/chameleon.png" alt="" />
+        <strong>CHAMELEON</strong>
+      </section>
+    </div>
     <div id="app" class="app-shell"></div>
     <div id="toast" class="toast" aria-live="polite"></div>
     <script>
       window.SKETCH_SUS_SERVER = window.location.hostname.endsWith("netlify.app")
         ? "https://sketch-and-sus-server.onrender.com"
         : window.location.origin;
+      window.setTimeout(() => document.querySelector("#introSplash")?.remove(), 8600);
     </script>
     <script src="/app.js" defer></script>
   </body>
