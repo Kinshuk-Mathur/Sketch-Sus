@@ -1381,11 +1381,12 @@ input:disabled {
 
 @media (max-width: 680px) {
   .screen {
-    width: min(100% - 18px, 1500px);
+    width: min(100% - 24px, 1500px);
     padding-top: 10px;
   }
 
   .topbar {
+    position: static;
     padding: 10px;
   }
 
@@ -1395,7 +1396,8 @@ input:disabled {
   }
 
   .entry-screen {
-    padding: 12px;
+    padding: 14px;
+    align-items: start;
   }
 
   .entry-panel,
@@ -1409,10 +1411,71 @@ input:disabled {
     padding: 14px;
   }
 
+  .entry-panel {
+    width: 100%;
+    gap: 18px;
+    border-width: 4px;
+    box-shadow: 7px 7px 0 var(--ink);
+  }
+
+  .entry-logo-wrap {
+    width: min(100%, 300px);
+    justify-self: center;
+  }
+
+  .entry-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .entry-actions .primary-btn,
+  .entry-actions .secondary-btn {
+    padding: 10px 8px;
+    white-space: nowrap;
+    font-size: 0.9rem;
+  }
+
+  .entry-actions .sound-menu {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
   .entry-copy h1,
-  .lobby-hero h1,
   .final-board h1 {
     font-size: 2.6rem;
+  }
+
+  .lobby-hero h1 {
+    font-size: 2.35rem;
+  }
+
+  .room-tools {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .room-tools .icon-btn,
+  .room-tools .sound-menu {
+    width: 100%;
+  }
+
+  .room-tools .icon-btn {
+    padding: 8px 6px;
+    font-size: 0.78rem;
+  }
+
+  .sound-menu {
+    display: block;
+  }
+
+  .sound-menu .icon-btn {
+    width: 100%;
+  }
+
+  .sound-popover {
+    right: 0;
+    width: min(270px, calc(100vw - 34px));
   }
 
   .reveal-stage h1,
