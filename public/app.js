@@ -205,6 +205,7 @@ function resetVerdictMarkersIfNeeded() {
 
 function handlePhaseSound(previous, next) {
   if (!previous) return;
+  if (next === "gameIntro") sfx.play("start");
   if (next === "roleReveal") sfx.play("start");
   if (next === "drawing") sfx.play("drawStart");
   if (next === "judgement") sfx.play("lock");
@@ -284,6 +285,12 @@ function render() {
     return;
   }
 
+  if (state.phase === "gameIntro") {
+    clearUiTicker();
+    app.innerHTML = renderGameIntro();
+    return;
+  }
+
   const content = {
     lobby: renderLobby,
     roleReveal: renderRoleReveal,
@@ -303,6 +310,31 @@ function render() {
   `;
 
   afterRender();
+}
+
+function renderGameIntro() {
+  return `
+    <main class="game-intro-screen">
+      <div class="intro-splash intro-splash-game" aria-hidden="true">
+        <section class="intro-slide intro-catcher">
+          <img src="/assets/catcher.png" alt="" />
+          <strong>CATCHER</strong>
+        </section>
+        <section class="intro-slide intro-inkster">
+          <img src="/assets/inkster.png" alt="" />
+          <strong>INKSTER</strong>
+        </section>
+        <section class="intro-slide intro-chameleon">
+          <img src="/assets/chameleon.png" alt="" />
+          <strong>CHAMELEON</strong>
+        </section>
+        <section class="intro-slide intro-play">
+          <img src="/assets/logo.jpeg" alt="" />
+          <strong>LET'S PLAY</strong>
+        </section>
+      </div>
+    </main>
+  `;
 }
 
 function renderEntry(label = "Ready") {

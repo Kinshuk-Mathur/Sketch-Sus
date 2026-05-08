@@ -1133,6 +1133,10 @@ input:disabled {
   animation: intro-shell-out 600ms ease 7.9s forwards;
 }
 
+.intro-splash-game {
+  animation: intro-shell-out 600ms ease 10.55s forwards;
+}
+
 .intro-slide {
   position: absolute;
   inset: 0;
@@ -1200,6 +1204,25 @@ input:disabled {
 
 .intro-chameleon strong {
   animation-delay: 5.56s;
+}
+
+.intro-play {
+  color: #fff;
+  background: var(--ink);
+  animation-delay: 7.95s;
+}
+
+.intro-play img {
+  width: min(240px, 34vw);
+  border: 5px solid #fff;
+  border-radius: 8px;
+  box-shadow: 9px 9px 0 var(--pink);
+  animation-delay: 7.95s, 8.71s;
+}
+
+.intro-play strong {
+  color: var(--gold);
+  animation-delay: 8.21s;
 }
 
 @keyframes point-pop {

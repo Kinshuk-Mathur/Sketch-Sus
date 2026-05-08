@@ -9,6 +9,7 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const MATCHES_PER_ROUND = 3;
 const DRAW_SECONDS = 80;
 const JUDGEMENT_SECONDS = 40;
+const GAME_INTRO_SECONDS = 11;
 const ROLE_REVEAL_SECONDS = 5;
 const RECONNECT_GRACE_MS = 60_000;
 
@@ -445,7 +446,7 @@ function startGame(room) {
   for (const player of room.players.values()) {
     if (player.connected) resetPlayerGameState(player);
   }
-  startNextMatch(room);
+  transitionTo(room, "gameIntro", GAME_INTRO_SECONDS);
 }
 
 function startNextMatch(room) {
@@ -518,6 +519,11 @@ function transitionTo(room, phase, seconds) {
 function onPhaseTimeout(code, phase) {
   const room = rooms.get(code);
   if (!room || room.phase !== phase) return;
+
+  if (phase === "gameIntro") {
+    startNextMatch(room);
+    return;
+  }
 
   if (phase === "roleReveal") {
     transitionTo(room, "drawing", DRAW_SECONDS);
