@@ -760,6 +760,32 @@ function verdictSplashForMe(result) {
   };
 }
 
+function settledVerdictForMe(result) {
+  const splash = verdictSplashForMe(result);
+
+  if (result.caught) {
+    if (state.me.role === "chameleon") {
+      return { headline: "LOSS", image: VERDICT_ASSET.chameleonCaught, alt: "Caught Chameleon", tone: "fail" };
+    }
+
+    if (state.me.role === "catcher") {
+      return { headline: "SUCCESS", image: VERDICT_ASSET.catcherHappy, alt: "Happy Catcher", tone: "success" };
+    }
+
+    return { headline: "CATCHER WON", image: VERDICT_ASSET.catcherHappy, alt: "Happy Catcher", tone: "success" };
+  }
+
+  if (state.me.role === "catcher") {
+    return { headline: "LOSS", image: VERDICT_ASSET.catcherLost, alt: "Sad Catcher", tone: "fail" };
+  }
+
+  if (state.me.role === "chameleon") {
+    return { headline: "WIN", image: VERDICT_ASSET.chameleonHappy, alt: "Winning Chameleon", tone: "success" };
+  }
+
+  return { headline: "CHAMELEON WON", image: splash.image, alt: splash.alt, tone: "fail" };
+}
+
 function renderVerdictSplash(result) {
   if (!result) return "";
   const splash = verdictSplashForMe(result);
@@ -797,12 +823,13 @@ function renderVerdictSplash(result) {
 function renderVerdict() {
   const result = state.result;
   const nextText = state.matchIndex >= state.totalMatches ? "Final leaderboard" : "Next match";
+  const settled = result ? settledVerdictForMe(result) : null;
   return `
     <section class="verdict-stage dark-panel ${result?.caught ? "is-success" : "is-chameleon"}">
       ${renderVerdictSplash(result)}
       <div id="verdictFx" class="verdict-fx" aria-hidden="true"></div>
       <div class="verdict-copy">
-        <img id="verdictCharacter" class="verdict-character is-hidden" src="${roleAsset(result?.caught ? "catcher" : "chameleon")}" alt="${result?.caught ? "Catcher" : "Chameleon"} winner character" />
+        <img id="verdictCharacter" class="verdict-character is-hidden" src="${settled?.image || roleAsset(result?.caught ? "catcher" : "chameleon")}" alt="${escapeHtml(settled?.alt || "Verdict character")}" />
         <p class="eyebrow">${escapeHtml(result?.verdictLine || "")}</p>
         <h1 id="verdictPulse">5</h1>
         <strong id="verdictRoleLine" class="is-hidden">${escapeHtml(result ? verdictLineForMe(result) : "")}</strong>
@@ -935,6 +962,7 @@ function updateVerdictVisual() {
   const elapsed = Date.now() - state.result.resolvedAt;
   const revealDelay = state.result.revealDelayMs || 5000;
   const remaining = Math.max(1, Math.ceil((revealDelay - elapsed) / 1000));
+  const settled = settledVerdictForMe(state.result);
 
   if (elapsed < revealDelay) {
     pulse.textContent = String(remaining);
@@ -946,9 +974,11 @@ function updateVerdictVisual() {
     character.classList.add("is-hidden");
   } else {
     splash?.classList.add("is-hidden");
-    pulse.textContent = state.result.headline;
+    pulse.textContent = settled.headline;
     pulse.classList.add("is-final");
     stage.classList.add("is-revealed");
+    if (!character.src.endsWith(settled.image)) character.src = settled.image;
+    character.alt = settled.alt;
     roleLine.textContent = verdictLineForMe(state.result);
     roleLine.classList.remove("is-hidden");
     tagline.classList.remove("is-hidden");
@@ -962,7 +992,7 @@ function updateVerdictVisual() {
   const tone = elapsed < revealDelay ? `splash:${state.result.resolvedAt}` : "verdict-settled";
   if (lastVerdictTone !== tone) {
     lastVerdictTone = tone;
-    if (elapsed < revealDelay) sfx.play(state.result.caught ? "success" : "fail");
+    if (elapsed < revealDelay) sfx.play(settled.tone);
   }
 }
 
