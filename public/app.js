@@ -765,7 +765,7 @@ function settledVerdictForMe(result) {
 
   if (result.caught) {
     if (state.me.role === "chameleon") {
-      return { headline: "LOSS", image: VERDICT_ASSET.chameleonCaught, alt: "Caught Chameleon", tone: "fail" };
+      return { headline: "LOSE", image: VERDICT_ASSET.chameleonCaught, alt: "Caught Chameleon", tone: "fail" };
     }
 
     if (state.me.role === "catcher") {
@@ -776,7 +776,7 @@ function settledVerdictForMe(result) {
   }
 
   if (state.me.role === "catcher") {
-    return { headline: "LOSS", image: VERDICT_ASSET.catcherLost, alt: "Sad Catcher", tone: "fail" };
+    return { headline: "LOSE", image: VERDICT_ASSET.catcherLost, alt: "Sad Catcher", tone: "fail" };
   }
 
   if (state.me.role === "chameleon") {
