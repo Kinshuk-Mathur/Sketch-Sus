@@ -19,6 +19,13 @@ const ROLE_ASSET = {
   catcher: "/assets/catcher.png",
 };
 
+const VERDICT_ASSET = {
+  catcherHappy: "/assets/catcher.png",
+  catcherLost: "/assets/catcher-lost.png",
+  chameleonHappy: "/assets/chameleon.png",
+  chameleonCaught: "/assets/chameleon-caught.png",
+};
+
 const PALETTE = [
   "#1a0b2b",
   "#ffffff",
@@ -681,11 +688,118 @@ function verdictLineForMe(result) {
   return `${result.chameleonName} wins as Chameleon`;
 }
 
+function verdictSplashForMe(result) {
+  const isCatcher = state.me.role === "catcher";
+  const isChameleon = state.me.role === "chameleon";
+  const chameleonName = result.chameleonName || "The Chameleon";
+  const catcherName = result.catcherName || "The Catcher";
+
+  if (result.caught) {
+    if (isCatcher) {
+      return {
+        theme: "catcher-win",
+        title: "YOU WON",
+        subtitle: `${chameleonName} was the chameleon`,
+        image: VERDICT_ASSET.catcherHappy,
+        alt: "Happy Catcher",
+        tagline: "You locked the right drawing.",
+      };
+    }
+
+    if (isChameleon) {
+      return {
+        theme: "chameleon-lost",
+        title: "YOU LOST",
+        subtitle: `${catcherName} caught you`,
+        image: VERDICT_ASSET.chameleonCaught,
+        alt: "Caught Chameleon",
+        tagline: "The disguise cracked.",
+      };
+    }
+
+    return {
+      theme: "catcher-win",
+      title: "CATCHER WON",
+      subtitle: `${chameleonName} was the chameleon`,
+      image: VERDICT_ASSET.catcherHappy,
+      alt: "Happy Catcher",
+      tagline: `${catcherName} found the fake.`,
+    };
+  }
+
+  if (isChameleon) {
+    return {
+      theme: "chameleon-win",
+      title: "YOU WIN",
+      subtitle: "You fooled everyone",
+      image: VERDICT_ASSET.chameleonHappy,
+      alt: "Winning Chameleon",
+      tagline: "Smooth blend. No crumbs.",
+    };
+  }
+
+  if (isCatcher) {
+    return {
+      theme: "catcher-lost",
+      title: "YOU LOST",
+      subtitle: `${chameleonName} fooled you`,
+      image: VERDICT_ASSET.catcherLost,
+      alt: "Sad Catcher",
+      tagline: result.tagline,
+      showDrawing: true,
+    };
+  }
+
+  return {
+    theme: "chameleon-win",
+    title: "CHAMELEON WON",
+    subtitle: `${chameleonName} fooled everyone`,
+    image: VERDICT_ASSET.chameleonHappy,
+    alt: "Winning Chameleon",
+    tagline: `${chameleonName} stayed hidden.`,
+  };
+}
+
+function renderVerdictSplash(result) {
+  if (!result) return "";
+  const splash = verdictSplashForMe(result);
+  const drawingOwner = playerById(result.chameleonId);
+  const particles = result.caught
+    ? ["POP", "WIN", "YES", "BAM", "LOCK"]
+    : ["FOOL", "NOPE", "SUS", "MISS", "OOPS"];
+
+  return `
+    <div id="verdictSplash" class="verdict-splash is-${splash.theme}" role="status" aria-live="assertive">
+      <div class="verdict-splash-particles" aria-hidden="true">
+        ${particles.map((word, index) => `<span style="--i:${index}">${word}</span>`).join("")}
+      </div>
+      <div class="verdict-splash-stack">
+        <img class="verdict-splash-character" src="${splash.image}" alt="${escapeHtml(splash.alt)}" />
+        <h1>${escapeHtml(splash.title)}</h1>
+        <p>${escapeHtml(splash.subtitle)}</p>
+        ${
+          splash.showDrawing && drawingOwner
+            ? `<article class="verdict-splash-drawing">
+                <canvas data-preview-id="${drawingOwner.id}" width="700" height="438"></canvas>
+                <div>
+                  <strong>${escapeHtml(drawingOwner.name)}</strong>
+                  <span>${roleName("chameleon")}</span>
+                </div>
+              </article>`
+            : ""
+        }
+        <strong>${escapeHtml(splash.tagline || result.tagline || "")}</strong>
+      </div>
+    </div>
+  `;
+}
+
 function renderVerdict() {
   const result = state.result;
   const nextText = state.matchIndex >= state.totalMatches ? "Final leaderboard" : "Next match";
   return `
     <section class="verdict-stage dark-panel ${result?.caught ? "is-success" : "is-chameleon"}">
+      ${renderVerdictSplash(result)}
       <div id="verdictFx" class="verdict-fx" aria-hidden="true"></div>
       <div class="verdict-copy">
         <img id="verdictCharacter" class="verdict-character is-hidden" src="${roleAsset(result?.caught ? "catcher" : "chameleon")}" alt="${result?.caught ? "Catcher" : "Chameleon"} winner character" />
@@ -814,6 +928,7 @@ function updateVerdictVisual() {
   const roleLine = document.querySelector("#verdictRoleLine");
   const tagline = document.querySelector("#verdictTagline");
   const character = document.querySelector("#verdictCharacter");
+  const splash = document.querySelector("#verdictSplash");
   const stage = document.querySelector(".verdict-stage");
   if (!pulse || !roleLine || !tagline || !character || !stage) return;
 
@@ -823,11 +938,14 @@ function updateVerdictVisual() {
 
   if (elapsed < revealDelay) {
     pulse.textContent = String(remaining);
+    pulse.classList.remove("is-final");
     stage.classList.remove("is-revealed");
+    splash?.classList.remove("is-hidden");
     roleLine.classList.add("is-hidden");
     tagline.classList.add("is-hidden");
     character.classList.add("is-hidden");
   } else {
+    splash?.classList.add("is-hidden");
     pulse.textContent = state.result.headline;
     pulse.classList.add("is-final");
     stage.classList.add("is-revealed");
@@ -841,11 +959,10 @@ function updateVerdictVisual() {
     }
   }
 
-  const tone = elapsed < revealDelay ? String(remaining) : state.result.headline;
+  const tone = elapsed < revealDelay ? `splash:${state.result.resolvedAt}` : "verdict-settled";
   if (lastVerdictTone !== tone) {
     lastVerdictTone = tone;
-    if (elapsed < revealDelay) sfx.play("countdown");
-    else sfx.play(state.result.caught ? "success" : "fail");
+    if (elapsed < revealDelay) sfx.play(state.result.caught ? "success" : "fail");
   }
 }
 
