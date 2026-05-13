@@ -434,7 +434,7 @@ function renderInstructionsModal() {
           </article>
           <article>
             <strong>${roleName("chameleon")}</strong>
-            <span>No word. Copy from delayed blur and survive.</span>
+            <span>No word. Starts locked 10s, then copies from delayed blur.</span>
           </article>
           <article>
             <strong>${roleName("catcher")}</strong>
