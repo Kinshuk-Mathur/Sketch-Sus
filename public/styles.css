@@ -833,6 +833,44 @@ input:disabled {
   box-shadow: inset 0 0 0 3px rgba(26, 11, 43, 0.08);
 }
 
+.canvas-wrap {
+  position: relative;
+}
+
+.canvas-wrap.is-locked .drawing-canvas {
+  filter: grayscale(0.2) brightness(0.82);
+}
+
+.canvas-lock {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  border: 5px solid #fff;
+  border-radius: 8px;
+  color: #fff;
+  text-align: center;
+  background: rgba(26, 11, 43, 0.62);
+  pointer-events: auto;
+}
+
+.canvas-lock span {
+  font-size: clamp(4rem, 10vw, 8rem);
+  filter: drop-shadow(6px 6px 0 rgba(0, 0, 0, 0.36));
+}
+
+.canvas-lock strong {
+  max-width: min(520px, 86%);
+  padding: 12px 16px;
+  border: 3px solid #fff;
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--gold);
+  box-shadow: 5px 5px 0 var(--pink);
+}
+
 .watch-panel {
   min-height: 100%;
 }
@@ -1315,6 +1353,72 @@ input:disabled {
 .toast.is-visible {
   transform: translateY(0);
   opacity: 1;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(26, 11, 43, 0.68);
+  backdrop-filter: blur(6px);
+}
+
+.how-card {
+  position: relative;
+  width: min(680px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  border: 5px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 10px 10px 0 var(--pink);
+}
+
+.how-card h2 {
+  margin: 0;
+  font-size: clamp(2.4rem, 7vw, 4.6rem);
+}
+
+.modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 42px;
+  height: 42px;
+  border: 3px solid var(--ink);
+  border-radius: 8px;
+  color: #fff;
+  background: var(--ink);
+  box-shadow: 4px 4px 0 var(--gold);
+}
+
+.how-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.how-grid article {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 3px solid var(--ink);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.how-grid span,
+.how-note {
+  color: rgba(26, 11, 43, 0.74);
+  font-family: Inter, system-ui, sans-serif;
+  font-weight: 1000;
+}
+
+.how-note {
+  margin: 0;
 }
 
 .intro-splash {

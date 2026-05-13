@@ -12,6 +12,8 @@ const JUDGEMENT_SECONDS = 40;
 const GAME_INTRO_SECONDS = 11;
 const ROLE_REVEAL_SECONDS = 5;
 const RECONNECT_GRACE_MS = 60_000;
+const CHAMELEON_LOCK_MS = 5_000;
+const CHAMELEON_PREVIEW_DELAY_MS = 2_000;
 
 const ROLE = {
   INKSTER: "inkster",
@@ -164,7 +166,7 @@ function createRoom() {
     hostId: null,
     players: new Map(),
     settings: {
-      rounds: 5,
+      rounds: 1,
       drawSeconds: DRAW_SECONDS,
       judgementSeconds: JUDGEMENT_SECONDS,
       matchesPerRound: MATCHES_PER_ROUND,
@@ -178,6 +180,8 @@ function createRoom() {
     word: null,
     catcherId: null,
     chameleonId: null,
+    drawingStartedAt: null,
+    chameleonCanDrawAt: null,
     canvases: new Map(),
     result: null,
     usedWords: [],
@@ -441,6 +445,8 @@ function startGame(room) {
   room.matchIndex = 0;
   room.word = null;
   room.result = null;
+  room.drawingStartedAt = null;
+  room.chameleonCanDrawAt = null;
   room.usedWords = [];
 
   for (const player of room.players.values()) {
@@ -467,6 +473,8 @@ function startNextMatch(room) {
   room.match = ((room.matchIndex - 1) % MATCHES_PER_ROUND) + 1;
   room.word = pickWord(room);
   room.result = null;
+  room.drawingStartedAt = null;
+  room.chameleonCanDrawAt = null;
   room.canvases = new Map();
 
   for (const player of room.players.values()) resetPlayerRoundState(player);
@@ -500,6 +508,8 @@ function resetToLobby(room, notice) {
   room.word = null;
   room.catcherId = null;
   room.chameleonId = null;
+  room.drawingStartedAt = null;
+  room.chameleonCanDrawAt = null;
   room.canvases = new Map();
   room.result = null;
   room.usedWords = [];
@@ -511,6 +521,10 @@ function transitionTo(room, phase, seconds) {
   clearTimeout(room.timer);
   room.phase = phase;
   room.phaseEndsAt = seconds ? Date.now() + seconds * 1000 : null;
+  if (phase === "drawing") {
+    room.drawingStartedAt = Date.now();
+    room.chameleonCanDrawAt = room.drawingStartedAt + CHAMELEON_LOCK_MS;
+  }
   room.timer = seconds ? setTimeout(() => onPhaseTimeout(room.code, phase), seconds * 1000) : null;
   if (room.timer) room.timer.unref?.();
   broadcastState(room);
@@ -577,7 +591,10 @@ function sanitizeStroke(input) {
 }
 
 function canDraw(room, player) {
-  return room.phase === "drawing" && (player.role === ROLE.INKSTER || player.role === ROLE.CHAMELEON);
+  if (room.phase !== "drawing") return false;
+  if (player.role === ROLE.INKSTER) return true;
+  if (player.role !== ROLE.CHAMELEON) return false;
+  return Date.now() >= (room.chameleonCanDrawAt || 0);
 }
 
 function pickAutomaticGuess(room) {
@@ -673,10 +690,21 @@ function visibleWordFor(room, player) {
 
 function serializeCanvases(room, viewer) {
   let canvases = [...room.canvases.values()];
+  const now = Date.now();
 
   if (room.phase === "drawing") {
     if (viewer.role === ROLE.CATCHER) canvases = [];
     if (viewer.role === ROLE.INKSTER) canvases = canvases.filter((canvas) => canvas.playerId === viewer.id);
+    if (viewer.role === ROLE.CHAMELEON) {
+      const cutoff = now - CHAMELEON_PREVIEW_DELAY_MS;
+      canvases = canvases.map((canvas) => {
+        if (canvas.playerId === viewer.id) return canvas;
+        return {
+          ...canvas,
+          strokes: canvas.strokes.filter((stroke) => (stroke.sentAt || 0) <= cutoff),
+        };
+      });
+    }
   }
 
   if (room.phase === "roleReveal") {
@@ -707,6 +735,9 @@ function stateFor(room, viewer, notice) {
     hostId: room.hostId,
     catcherId: room.catcherId,
     chameleonId: room.phase === "verdict" || room.phase === "gameOver" ? room.chameleonId : null,
+    drawingStartedAt: room.drawingStartedAt,
+    chameleonCanDrawAt: viewer.role === ROLE.CHAMELEON ? room.chameleonCanDrawAt : null,
+    chameleonPreviewDelayMs: viewer.role === ROLE.CHAMELEON ? CHAMELEON_PREVIEW_DELAY_MS : 0,
     word: visibleWordFor(room, viewer),
     notice: notice || null,
     me: {
@@ -834,6 +865,7 @@ function handleMessage(client, message) {
     const canvas = room.canvases.get(player.id);
     const stroke = sanitizeStroke(payload);
     if (!canvas || !stroke) return;
+    if (player.role === ROLE.CHAMELEON) stroke.tool = "brush";
     canvas.strokes.push(stroke);
     if (canvas.strokes.length > 8000) canvas.strokes.splice(0, canvas.strokes.length - 8000);
     broadcastCanvasEvent(room, player.id, "stroke", { playerId: player.id, stroke });
@@ -851,6 +883,7 @@ function handleMessage(client, message) {
 
   if (type === "undoStroke") {
     if (!canDraw(room, player)) return;
+    if (player.role === ROLE.CHAMELEON) return;
     const canvas = room.canvases.get(player.id);
     if (!canvas || canvas.strokes.length === 0) return;
     const stroke = canvas.strokes.pop();

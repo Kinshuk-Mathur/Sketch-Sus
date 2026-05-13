@@ -64,6 +64,8 @@ let lastVerdictTone = null;
 let lastVerdictKey = null;
 let verdictEffectPlayed = false;
 let soundMenuOpen = false;
+let instructionsOpen = false;
+const delayedPreviewTimers = new Map();
 
 const savedName = localStorage.getItem("sketchSus:name") || "";
 const urlRoom = new URLSearchParams(window.location.search).get("room") || "";
@@ -133,6 +135,7 @@ function connect() {
       if (state.me?.token) localStorage.setItem("sketchSus:token", state.me.token);
       if (previousPhase !== state.phase) handlePhaseSound(previousPhase, state.phase);
       selectedTarget = state.phase === "judgement" ? selectedTarget : null;
+      if (previousPhase !== state.phase) clearDelayedPreviewTimers();
       resetVerdictMarkersIfNeeded();
       render();
       return;
@@ -287,6 +290,15 @@ function displayScore(player) {
   return player.score;
 }
 
+function chameleonLockSecondsLeft() {
+  if (!state || state.me.role !== "chameleon" || state.phase !== "drawing" || !state.chameleonCanDrawAt) return 0;
+  return Math.max(0, Math.ceil((state.chameleonCanDrawAt - Date.now()) / 1000));
+}
+
+function chameleonLocked() {
+  return chameleonLockSecondsLeft() > 0;
+}
+
 function render() {
   if (!state) {
     renderEntry();
@@ -315,6 +327,7 @@ function render() {
       ${renderScoreboard()}
       <section class="screen-content">${content}</section>
     </main>
+    ${renderInstructionsModal()}
   `;
 
   afterRender();
@@ -370,10 +383,12 @@ function renderEntry(label = "Ready") {
           <div class="entry-actions">
             <button class="primary-btn" type="button" data-action="createRoom">Create room</button>
             <button class="secondary-btn" type="button" data-action="joinRoom">Join room</button>
+            <button class="icon-btn" type="button" data-action="toggleInstructions">How to play</button>
             ${renderSoundMenu("entry")}
           </div>
         </form>
       </section>
+      ${renderInstructionsModal()}
     </main>
   `;
 }
@@ -395,11 +410,40 @@ function renderTopbar() {
       </div>
       <div class="room-tools">
         <button class="icon-btn room-code" data-action="copyLink" title="Copy invite link">${state.roomCode}</button>
+        <button class="icon-btn" data-action="toggleInstructions" title="How to play">How</button>
         ${renderSoundMenu("topbar")}
         <button class="icon-btn" data-action="leaveRoom" title="Leave this room">Leave</button>
         ${state.me.isHost ? `<button class="icon-btn danger" data-action="dumpRoom" title="Delete this room for everyone">Dump room</button>` : ""}
       </div>
     </header>
+  `;
+}
+
+function renderInstructionsModal() {
+  if (!instructionsOpen) return "";
+  return `
+    <div class="modal-backdrop" data-action="closeInstructions">
+      <section class="how-card" role="dialog" aria-modal="true" aria-label="How to play" data-action="keepInstructionsOpen">
+        <button class="modal-close" type="button" data-action="closeInstructions" title="Close">×</button>
+        <p class="eyebrow">How to play</p>
+        <h2>Sketch & Sus</h2>
+        <div class="how-grid">
+          <article>
+            <strong>${roleName("inkster")}</strong>
+            <span>Knows the word. Draw it clearly.</span>
+          </article>
+          <article>
+            <strong>${roleName("chameleon")}</strong>
+            <span>No word. Copy from delayed blur and survive.</span>
+          </article>
+          <article>
+            <strong>${roleName("catcher")}</strong>
+            <span>Watch, accuse, and catch the fake.</span>
+          </article>
+        </div>
+        <p class="how-note">One round has 3 matches. Catcher decides after drawings unlock. Scores update after the reveal.</p>
+      </section>
+    </div>
   `;
 }
 
@@ -552,6 +596,7 @@ function renderDrawing() {
 
 function renderDrawerStage() {
   const isChameleon = state.me.role === "chameleon";
+  const locked = chameleonLocked();
   return `
     <section class="draw-layout ${isChameleon ? "" : "is-solo"}">
       <div class="draw-main dark-panel">
@@ -563,14 +608,24 @@ function renderDrawerStage() {
           <div class="timer-badge"><span class="js-timer">${formatTimer()}</span></div>
         </div>
         ${renderToolbar()}
-        <canvas id="drawingCanvas" class="drawing-canvas" width="1400" height="875" aria-label="Your drawing canvas"></canvas>
+        <div class="canvas-wrap ${locked ? "is-locked" : ""}">
+          <canvas id="drawingCanvas" class="drawing-canvas" width="1400" height="875" aria-label="Your drawing canvas"></canvas>
+          ${
+            locked
+              ? `<div class="canvas-lock" aria-live="polite">
+                  <span>🔒</span>
+                  <strong>Canvas unlocks in <b class="js-chameleon-lock">${chameleonLockSecondsLeft()}</b></strong>
+                </div>`
+              : ""
+          }
+        </div>
       </div>
       ${
         isChameleon
           ? `<aside class="watch-panel">
               <div class="panel-heading">
                 <h2>Blur feed</h2>
-                <span>Live hints</span>
+                <span>2 sec late</span>
               </div>
               <div class="mini-grid is-blurred">
                 ${drawingPlayers()
@@ -586,11 +641,12 @@ function renderDrawerStage() {
 }
 
 function renderToolbar() {
+  const isChameleon = state?.me?.role === "chameleon";
   return `
     <div class="toolbar" aria-label="Drawing tools">
       <div class="tool-group">
         <button class="tool-btn ${tool === "brush" ? "is-active" : ""}" data-action="setTool" data-tool="brush" title="Brush">Brush</button>
-        <button class="tool-btn ${tool === "eraser" ? "is-active" : ""}" data-action="setTool" data-tool="eraser" title="Eraser">Eraser</button>
+        ${isChameleon ? "" : `<button class="tool-btn ${tool === "eraser" ? "is-active" : ""}" data-action="setTool" data-tool="eraser" title="Eraser">Eraser</button>`}
       </div>
       <div class="swatches" aria-label="Colors">
         ${PALETTE.map((color) => `<button class="swatch ${brushColor === color ? "is-active" : ""}" style="background:${color}" data-action="setColor" data-color="${color}" title="${color}"></button>`).join("")}
@@ -599,10 +655,14 @@ function renderToolbar() {
         <span>Size</span>
         <input data-action="brushSize" type="range" min="2" max="34" value="${brushWidth}" />
       </label>
-      <div class="tool-group">
-        <button class="tool-btn" data-action="undoStroke" title="Undo">Undo</button>
-        <button class="tool-btn danger" data-action="clearCanvas" title="Clear">Clear</button>
-      </div>
+      ${
+        isChameleon
+          ? `<div class="tool-group"><button class="tool-btn danger" data-action="clearCanvas" title="Clear">Clear</button></div>`
+          : `<div class="tool-group">
+              <button class="tool-btn" data-action="undoStroke" title="Undo">Undo</button>
+              <button class="tool-btn danger" data-action="clearCanvas" title="Clear">Clear</button>
+            </div>`
+      }
     </div>
   `;
 }
@@ -930,6 +990,13 @@ function startUiTicker() {
     document.querySelectorAll(".js-timer").forEach((element) => {
       element.textContent = formatTimer();
     });
+    document.querySelectorAll(".js-chameleon-lock").forEach((element) => {
+      element.textContent = chameleonLockSecondsLeft();
+    });
+    if (state?.phase === "drawing" && state.me?.role === "chameleon" && !chameleonLocked()) {
+      document.querySelector(".canvas-wrap.is-locked")?.classList.remove("is-locked");
+      document.querySelector(".canvas-lock")?.remove();
+    }
     updateVerdictVisual();
     updateScoreboard();
   }, 200);
@@ -1016,13 +1083,18 @@ function mountDrawingCanvas() {
   redrawMainCanvas();
 
   canvas.onpointerdown = (event) => {
+    if (state.me.role === "chameleon" && chameleonLocked()) {
+      event.preventDefault();
+      sfx.play("lock");
+      return;
+    }
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
     const point = canvasPoint(canvas, event);
     activeStroke = {
       color: brushColor,
       width: brushWidth,
-      tool,
+      tool: state.me.role === "chameleon" ? "brush" : tool,
       points: [point],
       unsent: [],
       lastSentPoint: point,
@@ -1061,7 +1133,7 @@ function flushActiveStroke(force) {
   send("stroke", {
     color: activeStroke.color,
     width: activeStroke.width,
-    tool: activeStroke.tool,
+    tool: state.me.role === "chameleon" ? "brush" : activeStroke.tool,
     points,
   });
 
@@ -1088,11 +1160,34 @@ function applyStroke(payload) {
   if (!state) return;
   const canvas = canvasFor(payload.playerId);
   if (!canvas) return;
+  const shouldDelayPreview = state.phase === "drawing" && state.me.role === "chameleon" && payload.playerId !== state.me.id;
+
+  if (shouldDelayPreview) {
+    scheduleDelayedPreview(payload.playerId, payload.stroke);
+    return;
+  }
+
   canvas.strokes.push(payload.stroke);
 
   if (!(payload.playerId === state.me.id && state.phase === "drawing")) {
     paintStrokeOnVisibleCanvases(payload.playerId, payload.stroke);
   }
+}
+
+function scheduleDelayedPreview(playerId, stroke) {
+  const delay = state?.chameleonPreviewDelayMs ?? 2000;
+  const timer = setTimeout(() => {
+    delayedPreviewTimers.delete(timer);
+    const delayedCanvas = canvasFor(playerId);
+    if (delayedCanvas && !delayedCanvas.strokes.some((item) => item.id === stroke.id)) delayedCanvas.strokes.push(stroke);
+    paintStrokeOnVisibleCanvases(playerId, stroke);
+  }, delay);
+  delayedPreviewTimers.set(timer, true);
+}
+
+function clearDelayedPreviewTimers() {
+  delayedPreviewTimers.forEach((_, timer) => clearTimeout(timer));
+  delayedPreviewTimers.clear();
 }
 
 function paintStrokeOnVisibleCanvases(playerId, stroke) {
@@ -1270,6 +1365,24 @@ app.addEventListener("click", async (event) => {
     return;
   }
 
+  if (action === "toggleInstructions") {
+    instructionsOpen = !instructionsOpen;
+    sfx.play("click");
+    render();
+    return;
+  }
+
+  if (action === "closeInstructions") {
+    instructionsOpen = false;
+    sfx.play("click");
+    render();
+    return;
+  }
+
+  if (action === "keepInstructionsOpen") {
+    return;
+  }
+
   if (action === "leaveRoom") {
     send("leaveRoom");
     sfx.play("click");
@@ -1290,6 +1403,7 @@ app.addEventListener("click", async (event) => {
   }
 
   if (action === "setTool") {
+    if (state?.me?.role === "chameleon" && actionTarget.dataset.tool === "eraser") return;
     tool = actionTarget.dataset.tool;
     sfx.play("click");
     render();
@@ -1305,6 +1419,7 @@ app.addEventListener("click", async (event) => {
   }
 
   if (action === "undoStroke") {
+    if (state?.me?.role === "chameleon") return;
     send("undoStroke");
     return;
   }
